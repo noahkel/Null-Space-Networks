@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""On-disk artifact contract shared by the attack driver and the renderer.
+"""
+On-disk artifact contract shared by the attack driver and the renderer.
 
 src/attack.py writes a run's numeric/image artifacts with the write_* helpers
-here; src/visualisations.py reads them back with the read_* helpers and turns
-them into figures. Keeping the pair in one module is what stops the writer and
-the reader of a bundle from drifting apart.
+src/visualisations.py reads them back with the read_* helpers
 
-This module deliberately imports **neither matplotlib nor torch** — only json,
-csv and numpy. That is what lets attack.py stay figure-free (it used to reach
-into src/visualisations.py for the writers and pull matplotlib into every array
-task) and lets the renderer work without a GPU stack.
 """
 import csv
 import json

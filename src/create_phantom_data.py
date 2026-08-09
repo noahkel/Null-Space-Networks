@@ -9,7 +9,7 @@ For each sample, the pipeline:
   4. writes a summary.json with the geometry and noise statistics used by
      train.py and attack.py.
 
-Entry points: create_ellipse_data.py and create_rectangle_data.py.
+Entry points: create_data.py.
 """
 import argparse
 import json
