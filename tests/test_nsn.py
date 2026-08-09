@@ -795,7 +795,7 @@ def test_aggregate_missing_keys_become_nan(tmp_path):
 def _parse_cpd(argv):
     pytest.importorskip("odl")
     pytest.importorskip("dival")
-    import create_phantom_data as cpd
+    import src.create_phantom_data as cpd
     old = sys.argv
     sys.argv = ["create_phantom_data"] + argv
     try:
@@ -815,7 +815,7 @@ def test_pinv_mode_unthresholded():
 def test_pinv_mode_invalid_rejected():
     pytest.importorskip("odl")
     pytest.importorskip("dival")
-    import create_phantom_data as cpd
+    import src.create_phantom_data as cpd
     old = sys.argv
     sys.argv = ["create_phantom_data", "--pinv_mode", "bogus"]
     try:
