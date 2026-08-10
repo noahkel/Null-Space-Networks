@@ -1,14 +1,5 @@
 # Copy the results of a cluster run down to this machine.
 #
-# Figures are rendered on the cluster (the 'render' stage of submit_full_run.sh),
-# so what comes down is the finished product: the figures, the numeric tables
-# (aggregate_summary.csv/json, per_sample_metrics.csv, summary.json,
-# overview.md, epoch_study/*.csv).
-#
-# Only the .npz bundles stay behind. They are render *inputs* -- the per-sample
-# arrays the figures were drawn from -- and nothing reads them once the figures
-# exist. They are also the bulk of the bytes on the cluster.
-#
 # Usage (from the repo root):
 #   .\fetch_results.ps1                                  # uses the "cluster" alias from ~/.ssh/config
 #   .\fetch_results.ps1 -RemoteHost noah@login.example   # explicit user@host
@@ -22,19 +13,7 @@
 #
 # -Jump is only needed if the jump server is not already configured via
 # ProxyJump in ~/.ssh/config.
-#
-# Why this is not just "scp -r":
-#   A single ssh stream to the cluster tops out around 0.8 MB/s, but the link is
-#   limited per connection, not in aggregate -- 4 concurrent streams reach
-#   ~3.3 MB/s and 8 reach ~3.6 MB/s. So the transfer is split across $Streams
-#   parallel ssh connections, each streaming a tar of one byte-balanced slice of
-#   the file list. Files already present locally with the right size are skipped,
-#   so a re-run after a partial or interrupted transfer only fetches what is
-#   missing.
-#
-# Requires key-based ssh auth (a password prompt per connection would defeat the
-# point). Win32-OpenSSH has no ControlMaster, so connections cannot be
-# multiplexed -- each stream authenticates on its own.
+
 param(
     [string]$RemoteHost = "cluster",
     [string]$RemotePath = "/scratch/noah/Null-Space-Networks",
@@ -42,16 +21,7 @@ param(
     [string]$Jump = "",
     [int]$Streams = 6,
     [switch]$Force,
-    # Per-sample example images are ~96% of the figure bytes (about 2000 files /
-    # 560 MB per run directory, against ~18 MB for the overviews, per-attack
-    # summaries and epoch curves). They are fetched by default; -Summary skips
-    # them for a quick look at the headline figures.
     [switch]$Summary,
-    # Decide "already have it" by content hash rather than byte count. Costs one
-    # md5 pass over the ambiguous files on each side (a few hundred KB of
-    # network) and buys an exact answer: unchanged files are genuinely skipped,
-    # changed ones are genuinely re-fetched. Worth it when merging a new run into
-    # the directories of an old one, where equal size does not mean equal file.
     [switch]$Checksum
 )
 
@@ -60,7 +30,6 @@ $ErrorActionPreference = "Stop"
 $sshOpts = "-o BatchMode=yes"
 if ($Jump) { $sshOpts += " -J $Jump" }
 
-# Paths land in a .cmd file, where % starts a variable reference.
 foreach ($p in @($Dest, $RemotePath)) {
     if ($p -like "*%*") { throw "Path contains '%', which cmd.exe would expand: $p" }
 }
@@ -68,7 +37,6 @@ foreach ($p in @($Dest, $RemotePath)) {
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("fetch_results_" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force $work | Out-Null
 
-# Files are written with LF only: CRLF would hand GNU tar names with a trailing \r.
 function Write-LfFile($path, [string[]]$lines) {
     [System.IO.File]::WriteAllText($path, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
 }
@@ -92,7 +60,6 @@ function Test-PerSampleFigure([string]$rel) {
 }
 
 try {
-    # ---- 1. Remote inventory (one connection, metadata only) -----------------
     Write-Host "Listing ${RemoteHost}:${RemotePath}/attacks_* ..." -ForegroundColor Cyan
     $findCmd = "cd '$RemotePath' && find attacks_* -type f -printf '%s\t%p\n'"
     $raw = & ssh $sshOpts.Split(' ') $RemoteHost $findCmd
@@ -136,8 +103,6 @@ try {
     }
 
     # ---- 2. Diff against what is already here --------------------------------
-    # A local file counts as present only if its size matches the remote one,
-    # which catches files truncated by an interrupted transfer.
     $todo = New-Object System.Collections.ArrayList
     foreach ($rel in $remote.Keys) {
         $local = Join-Path $Dest ($rel -replace '/', '\')
@@ -149,12 +114,8 @@ try {
     }
 
     # -Checksum: size said "same" for these; verify by content and put back any
-    # that actually differ. Only the would-be-skipped files are hashed — they are
-    # the only ones where the decision can be wrong — so a fetch into a fresh
-    # directory costs nothing extra.
+    # that actually differ.
     if ($Checksum) {
-        # HashSet, not -notcontains: with ~23k remote files a linear scan per key
-        # is quadratic and would stall for minutes.
         $todoSet = New-Object 'System.Collections.Generic.HashSet[string]'
         foreach ($t in $todo) { [void]$todoSet.Add($t.Rel) }
         $maybeSame = @($remote.Keys | Where-Object { -not $todoSet.Contains($_) })
@@ -164,12 +125,6 @@ try {
             $hashPath = Join-Path $work "verify-hashes.txt"
             $vcmdPath = Join-Path $work "verify-run.cmd"
             Write-LfFile $listPath $maybeSame
-            # Fed through a .cmd wrapper, exactly like the transfer below, and for
-            # the same reason: `Get-Content ... | ssh` re-serialises each line with
-            # CRLF on the way into the process's stdin, so xargs received every
-            # path with a trailing \r and md5sum reported "No such file". `type`
-            # passes the LF-only list through untouched.
-            # Single quotes only, and plain xargs: run directory names have no spaces.
             Write-LfFile $vcmdPath @(
                 "@echo off",
                 "type ""$listPath"" | ssh $sshOpts $RemoteHost ""cd '$RemotePath' && xargs md5sum"" > ""$hashPath"""
@@ -187,9 +142,6 @@ try {
                 }
             }
 
-            # A wholesale failure must not look like "everything is unchanged".
-            # Treating a missing hash as "same" is how the CR bug above degraded
-            # silently into a plain size-based fetch while claiming to verify.
             if ($remoteHashes.Count -eq 0) {
                 Write-Host "Could not hash anything on the remote -- refusing to guess." -ForegroundColor Red
                 Write-Host "Re-run without -Checksum to skip by size instead." -ForegroundColor Red
@@ -207,7 +159,6 @@ try {
                 $rh = $remoteHashes[$rel]
                 $lh = $null
                 if ($rh) { $lh = (Get-FileHash -LiteralPath $local -Algorithm MD5).Hash.ToLower() }
-                # No hash back => cannot show it is unchanged => fetch it.
                 if (-not $rh -or $lh -ne $rh) {
                     [void]$todo.Add([pscustomobject]@{
                         Rel = $rel; Size = $remote[$rel]; Local = $local })
@@ -230,24 +181,17 @@ try {
         $(if ($skipped) { " (skipping $skipped already present)" } else { "" })) -ForegroundColor Cyan
 
     # ---- 3. Keep the machine awake -------------------------------------------
-    # ES_CONTINUOUS | ES_SYSTEM_REQUIRED, the same API media players use. The
-    # display may still turn off, and normal sleep behaviour returns as soon as
-    # the transfer ends. It does NOT override the lid-close action -- leave the
-    # lid open, or set "closing the lid -> do nothing" in the power options.
     if (-not ("Win32.Power" -as [type])) {
         Add-Type -Namespace Win32 -Name Power -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern uint SetThreadExecutionState(uint esFlags);
 '@
     }
-    # decimal literals: PS 5.1 parses 0x80000000 as a negative int32, breaking the cast
     $ES_CONTINUOUS      = [uint32]2147483648
     $ES_SYSTEM_REQUIRED = [uint32]1
     [void][Win32.Power]::SetThreadExecutionState($ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED)
 
     # ---- 4. Transfer ---------------------------------------------------------
-    # One pass = split the file list into byte-balanced buckets and stream each
-    # through its own ssh connection. Returns the files still missing afterwards.
     function Invoke-TransferPass($files, [int]$streamCount, [string]$tag) {
         $n = [Math]::Min($streamCount, $files.Count)
         $buckets = @(); $loads = @()
