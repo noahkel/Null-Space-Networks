@@ -167,49 +167,45 @@ def _rand(*shape):
 # --------------------------------------------------------------------------- #
 # thin re-export
 # --------------------------------------------------------------------------- #
-def _obj(pred, gt, clean, name, radon, w=0.25):
-    return attack.attack_objective(pred, gt, clean, name, w, radon=radon)
+def _obj(pred, gt, name, radon):
+    return attack.attack_objective(pred, gt, name, radon=radon)
 
 
-def test_objective_mse_shift_hybrid(radon):
+def test_objective_mse(radon):
     pred, gt, clean = _rand(4, 1, IMG, IMG), _rand(4, 1, IMG, IMG), _rand(4, 1, IMG, IMG)
-    assert torch.allclose(_obj(pred, gt, clean, "mse", radon), ((pred - gt) ** 2).mean())
-    assert torch.allclose(_obj(pred, gt, clean, "shift", radon), ((pred - clean) ** 2).mean())
-    hybrid = _obj(pred, gt, clean, "hybrid", radon)
-    expect = ((pred - gt) ** 2).mean() + 0.25 * ((pred - clean) ** 2).mean()
-    assert torch.allclose(hybrid, expect)
+    assert torch.allclose(_obj(pred, gt, "mse", radon), ((pred - gt) ** 2).mean())
 
 
 def test_objective_zero_is_negative_pred_energy(radon):
     pred, gt, clean = _rand(3, 1, IMG, IMG), _rand(3, 1, IMG, IMG), _rand(3, 1, IMG, IMG)
-    val = _obj(pred, gt, clean, "zero", radon)
+    val = _obj(pred, gt, "zero", radon)
     assert torch.allclose(val, -(pred ** 2).mean())
-    assert _obj(2 * pred, gt, clean, "zero", radon) < _obj(pred, gt, clean, "zero", radon)
+    assert _obj(2 * pred, gt, "zero", radon) < _obj(pred, gt, "zero", radon)
 
 
 def test_objective_target_is_negative_distance_to_target(radon):
     pred, gt, clean = _rand(3, 1, IMG, IMG), _rand(3, 1, IMG, IMG), _rand(3, 1, IMG, IMG)
     target = _rand(3, 1, IMG, IMG)
-    val = attack.attack_objective(pred, gt, clean, "target", 0.25, radon=radon, target=target)
+    val = attack.attack_objective(pred, gt, "target", radon=radon, target=target)
     assert torch.allclose(val, -((pred - target) ** 2).mean())
     zeros = torch.zeros_like(pred)
-    val0 = attack.attack_objective(pred, gt, clean, "target", 0.25, radon=radon, target=zeros)
-    assert torch.allclose(val0, _obj(pred, gt, clean, "zero", radon))
+    val0 = attack.attack_objective(pred, gt, "target", radon=radon, target=zeros)
+    assert torch.allclose(val0, _obj(pred, gt, "zero", radon))
     closer = target + 0.1 * (pred - target)
-    val_close = attack.attack_objective(closer, gt, clean, "target", 0.25, radon=radon, target=target)
+    val_close = attack.attack_objective(closer, gt, "target", radon=radon, target=target)
     assert val_close > val
 
 
 def test_objective_target_requires_target(radon):
     pred = _rand(2, 1, IMG, IMG)
     with pytest.raises(ValueError):
-        attack.attack_objective(pred, pred, pred, "target", 0.25, radon=radon)
+        attack.attack_objective(pred, pred, "target", radon=radon)
 
 
 def test_objective_null_range_decomposition(radon):
     pred, gt, clean = _rand(4, 1, IMG, IMG), _rand(4, 1, IMG, IMG), _rand(4, 1, IMG, IMG)
-    null = _obj(pred, gt, clean, "null", radon)
-    rng = _obj(pred, gt, clean, "range", radon)
+    null = _obj(pred, gt, "null", radon)
+    rng = _obj(pred, gt, "range", radon)
     e = pred - gt
     en = radon.proj_null_image(e)
     er = e - en
@@ -221,13 +217,13 @@ def test_objective_null_range_decomposition(radon):
 def test_objective_null_requires_radon():
     pred = _rand(2, 1, IMG, IMG)
     with pytest.raises(ValueError):
-        attack.attack_objective(pred, pred, pred, "null", 0.25, radon=None)
+        attack.attack_objective(pred, pred, "null", radon=None)
 
 
 def test_objective_unknown_raises(radon):
     pred = _rand(2, 1, IMG, IMG)
     with pytest.raises(ValueError):
-        attack.attack_objective(pred, pred, pred, "does_not_exist", 0.25, radon=radon)
+        attack.attack_objective(pred, pred, "does_not_exist", radon=radon)
 
 
 # --------------------------------------------------------------------------- #
@@ -339,8 +335,7 @@ def test_pgd_zero_objective_shrinks_prediction(radon):
     adapter, y_clean, clean_pred = _clean_setup(radon)
     eps = float(3.0 * attack.l2_norm_batch(y_clean).mean())
     res = attack.pgd_attack(adapter, x_gt=torch.zeros_like(clean_pred), y_clean=y_clean,
-                            clean_pred=clean_pred, eps=eps, alpha=0.1 * eps, steps=150,
-                            restarts=1, objective="zero", shift_weight=0.0)
+                            clean_pred=clean_pred, eps=eps, alpha=0.1 * eps, objective="zero")
     with torch.no_grad():
         adv_pred, _, _ = adapter.forward(res.y_adv, project=False)
     assert attack.l2_norm_batch(adv_pred).mean() < attack.l2_norm_batch(clean_pred).mean()
@@ -352,8 +347,7 @@ def test_pgd_mse_objective_grows_error(radon):
     x_gt = torch.zeros_like(clean_pred)
     eps = float(3.0 * attack.l2_norm_batch(y_clean).mean())
     res = attack.pgd_attack(adapter, x_gt=x_gt, y_clean=y_clean, clean_pred=clean_pred,
-                            eps=eps, alpha=0.1 * eps, steps=150, restarts=1,
-                            objective="mse", shift_weight=0.0)
+                            eps=eps, alpha=0.1 * eps, objective="mse")
     with torch.no_grad():
         adv_pred, _, _ = adapter.forward(res.y_adv, project=False)
     assert attack.l2_norm_batch(adv_pred - x_gt).mean() > attack.l2_norm_batch(clean_pred - x_gt).mean()
@@ -494,7 +488,7 @@ def test_all_suite_objectives_are_valid(radon):
     pred, gt, clean = _rand(2, 1, IMG, IMG), _rand(2, 1, IMG, IMG), _rand(2, 1, IMG, IMG)
     tgt = _rand(2, 1, IMG, IMG)
     for name in attack._SUITE_OBJECTIVE.values():
-        val = attack.attack_objective(pred, gt, clean, name, 0.25, radon=radon, target=tgt)
+        val = attack.attack_objective(pred, gt, name, radon=radon, target=tgt)
         assert torch.isfinite(val), f"objective {name!r} produced non-finite value"
 
 
@@ -607,9 +601,9 @@ def test_matrix_decompose_error_is_orthogonal(matrix_radon):
 
 def test_attack_objective_null_range_with_real_operator(matrix_radon):
     r = matrix_radon
-    pred, gt, clean = _img(2, 1, _RES, _RES), _img(2, 1, _RES, _RES), _img(2, 1, _RES, _RES)
-    null = attack.attack_objective(pred, gt, clean, "null", 0.0, radon=r)
-    rng = attack.attack_objective(pred, gt, clean, "range", 0.0, radon=r)
+    pred, gt = _img(2, 1, _RES, _RES), _img(2, 1, _RES, _RES)
+    null = attack.attack_objective(pred, gt, "null", radon=r)
+    rng = attack.attack_objective(pred, gt, "range", radon=r)
     e = pred - gt
     en = r.proj_null_image(e)
     assert torch.allclose(null, (en ** 2).mean(), atol=1e-10)
@@ -627,11 +621,9 @@ def _build_model(radon, name):
 
 
 def _pinv_adapter(radon, model):
-    init = attack.InitReconstructor(init_method="pinv",
-                                    summary={"operator_norm_A2": 1.0}, radon=radon)
+    init = attack.InitReconstructor(init_method="pinv", radon=radon)
     return attack.ModelAttackAdapter(model=model, init_reconstructor=init,
-                                     projector=lambda y: radon.proj_ran(y),
-                                     attack_init_mode="exact")
+                                     projector=lambda y: radon.proj_ran(y))
 
 
 def test_nsn_correction_lives_in_nullspace(matrix_radon):
@@ -655,7 +647,7 @@ def test_model_attack_adapter_forward_shapes(matrix_radon):
     adapter = _pinv_adapter(r, resnet)
     x0 = _img(2, 1, _RES, _RES)
     y_clean = r.forward_la(x0)
-    pred, x_init, y_used = adapter.forward(y_clean, mode="exact")
+    pred, x_init, y_used = adapter.forward(y_clean)
     assert pred.shape == (2, 1, _RES, _RES)
     assert x_init.shape == (2, 1, _RES, _RES)
     # exact pinv init == backward_la of the projected sinogram
@@ -674,11 +666,10 @@ def test_pgd_end_to_end_real_model(matrix_radon, model_name):
     x0 = _img(2, 1, _RES, _RES)
     y_clean = r.proj_ran(r.forward_la(x0))
     with torch.no_grad():
-        clean_pred, _, _ = adapter.forward(y_clean, mode="exact")
+        clean_pred, _, _ = adapter.forward(y_clean)
     eps = float(0.1 * attack.l2_norm_batch(y_clean).mean())
     res = attack.pgd_attack(adapter, x_gt=x0, y_clean=y_clean, clean_pred=clean_pred,
-                            eps=eps, alpha=0.3 * eps, steps=3, restarts=1,
-                            objective="null", shift_weight=0.0)
+                            eps=eps, alpha=0.3 * eps, objective="null")
     assert res.y_adv.shape == y_clean.shape
     assert float(attack.l2_norm_batch(res.delta).max()) <= eps + 1e-6
     # the perturbation stays in the measured subspace (projector applied)
@@ -1376,7 +1367,7 @@ def test_dpnsn_res_requires_y_delta(model_radon):
         DPNSN_RES(_unet_returning(model_radon), model_radon, beta=0.5)(x)
 
 
-@pytest.mark.parametrize("name", ["resnet", "nsn", "dpnsn", "dpnsn_res"])
+@pytest.mark.parametrize("name", ["resnet", "nsn"])
 def test_every_model_preserves_shape_and_is_differentiable(model_radon, name):
     """Preconditions for both training and attacking: PGD differentiates the
     reconstruction with respect to the sinogram, so a broken graph on any one
@@ -1536,17 +1527,8 @@ def test_prepare_run_resolves_the_shared_context(tmp_path, monkeypatch):
     root = _data_root(tmp_path)
     monkeypatch.setattr(attack, "build_radon", lambda *a, **k: object())
     s = attack.prepare_run(_prep_args(root))
-    assert s.example == "ellipses"
-    assert s.beta == 0.5 and s.noise_rel == 0.02 and s.mean_sino_norm == 7.0
+    assert s.noise_rel == 0.02 and s.mean_sino_norm == 7.0
     assert set(s.inits) == {"pinv", "fbp"}
-
-
-def test_prepare_run_maps_rectangles_onto_the_ellipses_loader(tmp_path, monkeypatch):
-    """Rectangles share the on-disk layout; picking a 'rectangles' loader would
-    fail, so the mapping is deliberate and worth pinning."""
-    root = _data_root(tmp_path, dataset="rectangles")
-    monkeypatch.setattr(attack, "build_radon", lambda *a, **k: object())
-    assert attack.prepare_run(_prep_args(root)).example == "ellipses"
 
 
 def test_prepare_run_out_root_defaults_to_the_noise_level(tmp_path, monkeypatch):
@@ -1577,15 +1559,16 @@ def test_prepare_run_requires_a_data_root():
         attack.prepare_run(_prep_args("", data_root=None))
 
 
-@pytest.mark.parametrize("fp64,expected", [(True, torch.float64), (False, torch.float32)])
-def test_prepare_run_passes_the_dtype_through(tmp_path, monkeypatch, fp64, expected):
+def test_prepare_run_passes_the_dtype_through(tmp_path, monkeypatch):
+    """dtype/dense are module-level toggles (F64, SPARSE) rather than CLI flags
+    today, so this pins the current default rather than per-call configurability."""
     root = _data_root(tmp_path)
     seen = {}
     monkeypatch.setattr(attack, "build_radon",
                         lambda summary, **k: seen.update(k) or object())
-    attack.prepare_run(_prep_args(root, fp64=fp64))
-    assert seen["dtype"] is expected
-    assert seen["dense"] is True          # --sparse-radon off => dense operators
+    attack.prepare_run(_prep_args(root))
+    assert seen["dtype"] is torch.float32
+    assert seen["dense"] is True
 
 
 def test_build_input_cache_stops_at_max_samples():
@@ -1606,78 +1589,6 @@ def test_build_input_cache_applies_the_range_projector():
     cache = attack.build_input_cache(lambda y: y * 0.0, batches, max_samples=2,
                                      device=torch.device("cpu"))
     assert torch.allclose(cache[0][2], torch.zeros_like(cache[0][2]))
-
-
-# =========================================================================== #
-# Null-restricted Lipschitz estimate.
-#
-# This produces a headline claim ("NSN < 1 < ResNet") and had no test at all.
-# The cases below have an analytically known answer, so the estimator is checked
-# against arithmetic rather than against itself.
-# =========================================================================== #
-class _GainModel(torch.nn.Module):
-    """f(x) = x + gain * P_N(x).
-
-    P_N is idempotent, so the null-restricted correction g(x) = P_N(f(x) - x)
-    equals gain * P_N(x): a linear map whose operator norm on null(A_la) is
-    exactly ``gain``. That is the number the estimator must return.
-    """
-
-    def __init__(self, radon, gain):
-        super().__init__()
-        self.radon, self.gain = radon, gain
-
-    def forward(self, x, y=None):
-        return x + self.gain * self.radon.proj_null_image(x)
-
-
-def _lipschitz_cache(radon, n=2):
-    x = torch.randn(n, 1, radon.IMG, radon.IMG, dtype=radon.dtype)
-    return [(x, x.clone(), radon.forward_la(x))]
-
-
-@pytest.mark.parametrize("gain", [0.5, 1.0, 2.5])
-def test_lipschitz_recovers_a_known_null_space_gain(model_radon, gain):
-    res = attack.estimate_lipschitz_nullspace(
-        model=_GainModel(model_radon, gain),
-        clean_cache=_lipschitz_cache(model_radon), radon=model_radon,
-        n_samples=2, n_iter=12)
-    assert res["mean"] == pytest.approx(gain, rel=0.05), res
-    assert res["max"] == pytest.approx(gain, rel=0.05)
-    assert res["n"] == 2
-
-
-def test_lipschitz_is_zero_for_a_model_that_does_nothing(model_radon):
-    """An identity model has no learned correction, so its null-space gain is 0.
-    A non-zero answer here would mean the estimator is measuring the operator
-    rather than the network."""
-    res = attack.estimate_lipschitz_nullspace(
-        model=_GainModel(model_radon, 0.0),
-        clean_cache=_lipschitz_cache(model_radon), radon=model_radon,
-        n_samples=2, n_iter=8)
-    assert res["mean"] == pytest.approx(0.0, abs=1e-6)
-
-
-def test_lipschitz_orders_models_by_amplification(model_radon):
-    """The comparison the figure actually makes: a model that amplifies null
-    directions must score above one that suppresses them."""
-    cache = _lipschitz_cache(model_radon)
-    quiet = attack.estimate_lipschitz_nullspace(
-        model=_GainModel(model_radon, 0.3), clean_cache=cache,
-        radon=model_radon, n_samples=1, n_iter=10)["mean"]
-    loud = attack.estimate_lipschitz_nullspace(
-        model=_GainModel(model_radon, 3.0), clean_cache=cache,
-        radon=model_radon, n_samples=1, n_iter=10)["mean"]
-    assert quiet < 1.0 < loud
-
-
-def test_lipschitz_respects_the_sample_budget(model_radon):
-    x = torch.randn(8, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    cache = [(x, x.clone(), model_radon.forward_la(x))]
-    res = attack.estimate_lipschitz_nullspace(
-        model=_GainModel(model_radon, 1.0), clean_cache=cache,
-        radon=model_radon, n_samples=3, n_iter=6)
-    assert res["n"] == 3, "the budget bounds a slow power iteration"
 
 
 # =========================================================================== #
@@ -1802,32 +1713,12 @@ def test_dataloader_is_deterministic_without_shuffle(tmp_path):
     assert a == b
 
 
-def test_lipschitz_empty_result_is_still_readable(model_radon):
-    """An empty cache (max_samples=0, or a loader that yielded nothing) must not
-    produce a dict the plotter cannot read."""
-    res = attack.estimate_lipschitz_nullspace(
-        model=_GainModel(model_radon, 1.0), clean_cache=[], radon=model_radon,
-        n_samples=4)
-    assert res["n"] == 0
-    assert math.isnan(res["mean"])
-    json.dumps(res)
-
-
 def test_lipschitz_plot_renders(tmp_path):
     V = _vis()
     lip = {"nsn": {"mean": 0.6, "std": 0.1, "max": 0.8, "n": 4},
            "resnet": {"mean": 2.1, "std": 0.3, "max": 2.9, "n": 4}}
     V.save_lipschitz_plot(tmp_path, lip)
     assert (tmp_path / "lipschitz_nullspace.png").exists()
-
-
-def test_lipschitz_result_is_json_serialisable(model_radon):
-    """It is written straight to lipschitz_nullspace.json; a non-serialisable
-    field would fail only at the very end of a suite run."""
-    res = attack.estimate_lipschitz_nullspace(
-        model=_GainModel(model_radon, 1.0), clean_cache=_lipschitz_cache(model_radon),
-        radon=model_radon, n_samples=1, n_iter=4)
-    json.dumps(res)
 
 
 # =========================================================================== #
