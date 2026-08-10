@@ -622,7 +622,7 @@ def test_attack_objective_null_range_with_real_operator(matrix_radon):
 # --------------------------------------------------------------------------- #
 def _build_model(radon, name):
     from src.utils import build_models
-    model = build_models([name], radon=radon, beta=1.0)[name]
+    model = build_models([name], radon=radon)[name]
     return model.double().eval()      # match the float64 operator
 
 
@@ -923,19 +923,19 @@ def test_build_models_all_four():
     class _FakeRadon:  # only stored by the wrappers, never called at init
         pass
 
-    models = build_models(["resnet", "nsn", "dpnsn", "dpnsn_res"],
-                          radon=_FakeRadon(), beta=1.0)
-    assert set(models) == {"resnet", "nsn", "dpnsn", "dpnsn_res"}
+    models = build_models(["resnet", "nsn"],
+                          radon=_FakeRadon())
+    assert set(models) == {"resnet", "nsn"}
 
 
 def test_detect_suite_models_finds_all_four(tmp_path):
     init = "fbp"
     ck = tmp_path / f"init_{init}" / "checkpoints"
     ck.mkdir(parents=True)
-    for m in ("resnet", "nsn", "dpnsn", "dpnsn_res"):
+    for m in ("resnet", "nsn"):
         (ck / f"{m}_best.pt").write_bytes(b"x")
     found = attack.detect_suite_models(str(tmp_path), init)
-    assert set(found) == {"resnet", "nsn", "dpnsn", "dpnsn_res"}
+    assert set(found) == {"resnet", "nsn"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1382,7 +1382,7 @@ def test_every_model_preserves_shape_and_is_differentiable(model_radon, name):
     reconstruction with respect to the sinogram, so a broken graph on any one
     model would silently produce zero-gradient 'attacks'."""
     from src.utils import build_models
-    model = build_models([name], radon=model_radon, beta=0.5)[name].to(torch.float64)
+    model = build_models([name], radon=model_radon)[name].to(torch.float64)
     x = torch.randn(2, 1, model_radon.IMG, model_radon.IMG,
                     dtype=model_radon.dtype, requires_grad=True)
     y = model_radon.forward_la(x).detach()
