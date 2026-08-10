@@ -7,7 +7,6 @@
 #   bash pipeline.sh --serial           submit one long serial job instead
 #
 #   PINV_MODE=unthresholded bash pipeline.sh   # unthresholded pinv init
-#   SHAPE=rectangles bash pipeline.sh          # the rectangles dataset
 #   MATRIX_MODE=0 bash pipeline.sh             # astra backend instead of matrix
 #   CREATE_DATA=0 TRAIN=0 bash pipeline.sh     # reuse existing data + models
 #   EPS="0.005 0.01 0.02" bash pipeline.sh     # a different noise sweep
@@ -87,7 +86,7 @@ MIN_ANGLE=${MIN_ANGLE:-0}
 MAX_ANGLE=${MAX_ANGLE:-120}        # limited angle
 NUM_THETAS=${NUM_THETAS:-180}
 N_SAMPLES=${N_SAMPLES:-5000}
-TYPE=${TYPE:-ellipses}             # dataloader, not the shape — see SHAPE above
+TYPE=${TYPE:-ellipses}             # dataloader
 MODELS=${MODELS:-resnet,nsn,dpnsn,dpnsn_res}
 
 # Noise levels. One data set + one model set + one attack run per level.
@@ -382,7 +381,7 @@ run_worker() {
     setup_env
 
     echo "[config] stage=$STAGE task=${SLURM_ARRAY_TASK_ID:-<none>}"
-    echo "[config] shape=$SHAPE matrix_mode=$MATRIX_MODE pinv_mode=$PINV_MODE variant_tag='${VARIANT_TAG}'"
+    echo "[config] matrix_mode=$MATRIX_MODE pinv_mode=$PINV_MODE variant_tag='${VARIANT_TAG}'"
 
     [ "$STAGE" = "all" ] && { run_serial; return; }
 
@@ -534,7 +533,7 @@ run_submitter() {
     echo "  repo         $REPO_DIR"
     echo "  commit       $(git rev-parse --short HEAD 2>/dev/null || echo '?')$(
             test -n "$(git status --porcelain 2>/dev/null)" && echo ' (DIRTY)')"
-    echo "  shape        $SHAPE  (generator $CREATE_SCRIPT, loader $TYPE)"
+    echo "  generator    $CREATE_SCRIPT, loader $TYPE"
     echo "  backend      matrix_mode=$MATRIX_MODE $(if [ "$MATRIX_MODE" -eq 1 ]; then echo '(matrix + truncated-SVD pinv)'; else echo '(astra, no pinv init)'; fi)"
     echo "  pinv_mode    $PINV_MODE$(if [ "$MATRIX_MODE" -eq 0 ]; then echo '  (n/a for astra)'; fi)"
     echo "  variant tag  '${VARIANT_TAG:-<baseline>}'"
@@ -591,7 +590,7 @@ run_submitter() {
 
     # Every knob the worker reads is exported, so the array tasks see exactly
     # the configuration printed above rather than re-deriving defaults.
-    local exports="ALL,REPO_DIR=$REPO_DIR,SHAPE=$SHAPE,MATRIX_MODE=$MATRIX_MODE"
+    local exports="ALL,REPO_DIR=$REPO_DIR,MATRIX_MODE=$MATRIX_MODE"
     exports="$exports,PINV_MODE=$PINV_MODE,EPS=$EPS"
     exports="$exports,CREATE_DATA=$CREATE_DATA,TRAIN=$TRAIN,RUN_EPOCH_STUDY=$RUN_EPOCH_STUDY"
     exports="$exports,MAX_SAMPLES=$MAX_SAMPLES,EPOCH_STUDY_MAX=$EPOCH_STUDY_MAX"
