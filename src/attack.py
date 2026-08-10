@@ -273,6 +273,7 @@ def attack_objective(
         # Null-space: reward only the null-space error component
         if radon is None:
             raise ValueError(f"Objective 'null' requires a radon operator.")
+        err = pred - x_gt
         return reduce_loss(radon.proj_null_image(err)**2)
 
     if objective == "zero":
@@ -320,8 +321,7 @@ def pgd_attack(
     best_score = -float("inf")
 
     def loss_of(pred):
-        return attack_objective(pred, x_gt, clean_pred, objective,
-                                radon=radon, target=target)
+        return attack_objective(pred, x_gt, objective, radon=radon, target=target)
 
     for _ in range(SUITE_RESTARTS):
         delta = random_start_like(y_clean, eps, adapter.projector)
@@ -373,7 +373,7 @@ def build_radon(summary: Dict, device: torch.device,
             dtype=dtype,
             dense=dense,
             phi=phi,
-            svd_threshold=float(summary.get("svd_threshold")),
+            svd_threshold=float(summary.get("svd_threshold") or 0.0),
             cache_dir="radon_cache",
         )
     return AstraRadonAdapter(
@@ -821,7 +821,7 @@ def detect_suite_models(model_dir: Optional[str], init_method: str) -> List[str]
     found = []
     for m in known:
         candidates = [
-            base / f"init_{init_method}" / f"{m}_best.pt"
+            base / f"init_{init_method}" / "checkpoints" / f"{m}_best.pt"
         ]
         if any(p.exists() for p in candidates):
             found.append(m)
@@ -862,7 +862,7 @@ def prepare_run(args) -> RunSetup:
         noise_rel=noise_rel,
         mean_sino_norm=float(summary.get("mean_norm_y") or 0.0),
         inits=inits,
-        out_root=Path(args.out_dir),
+        out_root=Path(args.out_dir or f"attacks_n{noise_rel}"),
     )
 
 def build_init_inputs(args, summary, radon, init_method: str, max_samples: int, device):
