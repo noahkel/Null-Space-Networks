@@ -69,7 +69,7 @@ cd "$REPO_DIR" || exit 1
 # 1. Configuration — every knob, overridable from the submitting shell.
 # =========================================================================== #
 
-CREATE_SCRIPT=create_data.py ;;
+CREATE_SCRIPT=create_data.py
 
 # ── Radon backend ────────────────────────────────────────────────────────────
 # 1 = MatrixRadonAdapter: explicit A_la matrix with a truncated-SVD pseudoinverse.
@@ -109,10 +109,8 @@ fi
 VARIANT_TAG="${PINV_TAG}"
 
 # Path scheme, chosen so the defaults reproduce the trees that already exist:
-#   ellipses   + matrix : /scratch/noah/data/ellipses_out_matrices
-#   ellipses   + astra  : /scratch/noah/data/ellipses_out
-DATA_BASE=${DATA_BASE:-/scratch/noah/data/${SHAPE}_out${MATRIX_SUFFIX}${PINV_TAG}}
-MODEL_BASE=${MODEL_BASE:-/scratch/noah/models_${SHAPE}${MATRIX_SUFFIX}${VARIANT_TAG}}
+DATA_BASE=${DATA_BASE:-/scratch/noah/data${MATRIX_SUFFIX}${PINV_TAG}}
+MODEL_BASE=${MODEL_BASE:-/scratch/noah/models${MATRIX_SUFFIX}${VARIANT_TAG}}
 
 # ── Attack budgets ───────────────────────────────────────────────────────────
 # eps is scaled per sample by ||y_i|| inside attack.py and --suite-eps defaults
@@ -159,7 +157,7 @@ MAX_CONCURRENT=${MAX_CONCURRENT:-4}
 
 # The trailing _l2 is historical — the suite is L2-only now — but it is what the
 # existing result trees are called, so a re-run lands in the same directory.
-out_dir_for()   { echo "attacks_${SHAPE}_n${1}${VARIANT_TAG}_l2"; }
+out_dir_for()   { echo "attacks_n${1}${VARIANT_TAG}_l2"; }
 data_dir_for()  { echo "$DATA_BASE/$1"; }
 model_dir_for() { echo "$MODEL_BASE/$1"; }
 
