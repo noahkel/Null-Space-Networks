@@ -1,20 +1,10 @@
 #!/bin/bash
-# The whole cluster pipeline: configuration, Slurm plumbing, the stage bodies,
-# the array worker and the submitter — one file, three ways in.
+# The whole cluster pipeline
 #
 #   bash pipeline.sh                    submit the chained Slurm arrays (login node)
 #   bash pipeline.sh --dry-run          print the plan, submit nothing
 #   bash pipeline.sh --only render      submit a subset of the stages
 #   bash pipeline.sh --serial           submit one long serial job instead
-#
-#   STAGE=attack SLURM_ARRAY_TASK_ID=0 bash pipeline.sh     run one task by hand
-#
-# Which role it takes is decided at the bottom: STAGE set => worker (this is how
-# the array tasks re-enter the script), otherwise => submitter. sbatch is given
-# this same file, so there is nothing to keep in sync.
-#
-# Variant runs come from the environment, since sbatch exports the submitting
-# shell by default:
 #
 #   PINV_MODE=unthresholded bash pipeline.sh   # unthresholded pinv init
 #   SHAPE=rectangles bash pipeline.sh          # the rectangles dataset
@@ -44,11 +34,6 @@
 #SBATCH --partition=all
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=c7021201@uibk.ac.at
-# Explicit wall clock: job 20585 ran 141 h on the partition default, which is
-# luck rather than a plan.
-#SBATCH --time=48:00:00
-# SIGTERM the batch shell (B:) 60 s before the hard kill so the EXIT trap below
-# can still send a "FAILED" ping on TIMEOUT.
 #SBATCH --signal=B:TERM@60
 
 # Not `set -e`: a stage is allowed to fail without killing the rest of the job
@@ -84,18 +69,7 @@ cd "$REPO_DIR" || exit 1
 # 1. Configuration — every knob, overridable from the submitting shell.
 # =========================================================================== #
 
-# ── Phantom shape ────────────────────────────────────────────────────────────
-# ellipses | rectangles — picks the generator and namespaces every output tree.
-# Note TYPE (the *dataloader*) stays "ellipses" for both: rectangles use the same
-# on-disk layout, which is why attack.py maps both shapes onto the ellipses
-# loader. Setting TYPE=rectangles would look tidier and would not work.
-SHAPE=${SHAPE:-ellipses}
-case "$SHAPE" in
-    ellipses)   CREATE_SCRIPT=create_ellipse_data.py ;;
-    rectangles) CREATE_SCRIPT=create_rectangle_data.py ;;
-    *) echo "pipeline.sh: unknown SHAPE '$SHAPE' (expected ellipses or rectangles)" >&2
-       exit 1 ;;
-esac
+CREATE_SCRIPT=create_data.py ;;
 
 # ── Radon backend ────────────────────────────────────────────────────────────
 # 1 = MatrixRadonAdapter: explicit A_la matrix with a truncated-SVD pseudoinverse.
@@ -114,12 +88,10 @@ MAX_ANGLE=${MAX_ANGLE:-120}        # limited angle
 NUM_THETAS=${NUM_THETAS:-180}
 N_SAMPLES=${N_SAMPLES:-5000}
 TYPE=${TYPE:-ellipses}             # dataloader, not the shape — see SHAPE above
-# dpnsn / dpnsn_res wrapper classes exist in src/wrappers.py but build_models()
-# does not construct them yet (no `beta` wiring), so they are not usable here.
-MODELS=${MODELS:-resnet,nsn}
+MODELS=${MODELS:-resnet,nsn,dpnsn,dpnsn_res}
 
 # Noise levels. One data set + one model set + one attack run per level.
-EPS=${EPS:-"0.005 0.01"}
+EPS=${EPS:-"0.005 0.01 0.02 0.05"}
 
 # ── pinv initialisation operator ─────────────────────────────────────────────
 # "thresholded"   = truncated-SVD A_la^+ (the baseline every result so far uses)
@@ -139,7 +111,6 @@ VARIANT_TAG="${PINV_TAG}"
 # Path scheme, chosen so the defaults reproduce the trees that already exist:
 #   ellipses   + matrix : /scratch/noah/data/ellipses_out_matrices
 #   ellipses   + astra  : /scratch/noah/data/ellipses_out
-#   rectangles + matrix : /scratch/noah/data/rectangles_out_matrices
 DATA_BASE=${DATA_BASE:-/scratch/noah/data/${SHAPE}_out${MATRIX_SUFFIX}${PINV_TAG}}
 MODEL_BASE=${MODEL_BASE:-/scratch/noah/models_${SHAPE}${MATRIX_SUFFIX}${VARIANT_TAG}}
 
