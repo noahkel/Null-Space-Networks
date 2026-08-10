@@ -53,7 +53,7 @@ from src.artifacts import (
 )
 
 F64 = False
-SPARSE = FALSE
+SPARSE = False
 SEED = 42
 
 SUITE_STEPS = 50
