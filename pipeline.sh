@@ -114,7 +114,9 @@ MAX_ANGLE=${MAX_ANGLE:-120}        # limited angle
 NUM_THETAS=${NUM_THETAS:-180}
 N_SAMPLES=${N_SAMPLES:-5000}
 TYPE=${TYPE:-ellipses}             # dataloader, not the shape — see SHAPE above
-MODELS=${MODELS:-resnet,nsn,dpnsn,dpnsn_res}
+# dpnsn / dpnsn_res wrapper classes exist in src/wrappers.py but build_models()
+# does not construct them yet (no `beta` wiring), so they are not usable here.
+MODELS=${MODELS:-resnet,nsn}
 
 # Noise levels. One data set + one model set + one attack run per level.
 EPS=${EPS:-"0.005 0.01"}

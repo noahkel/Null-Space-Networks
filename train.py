@@ -273,7 +273,7 @@ if __name__ == "__main__":
                         help="A single data directory produced by create_ellipse_data.py "
                              "(e.g. ./data/0.01), containing summary.json and the "
                              "gt/sino/init-recon folders.")
-    parser.add_argument("--models", type=str, default="resnet,nsn,dpnsn,dpnsn_res")
+    parser.add_argument("--models", type=str, default="resnet,nsn")
     parser.add_argument("--checkpoint-every-epoch", action="store_true",
                         help="Save each epoch's weights ({model}_epoch{NNN}.pt) so the "
                              "epoch-attack study can attack every epoch individually "
