@@ -87,7 +87,7 @@ MAX_ANGLE=${MAX_ANGLE:-120}        # limited angle
 NUM_THETAS=${NUM_THETAS:-180}
 N_SAMPLES=${N_SAMPLES:-5000}
 TYPE=${TYPE:-ellipses}             # dataloader
-MODELS=${MODELS:-resnet,nsn,dpnsn,dpnsn_res}
+MODELS=${MODELS:-resnet,nsn}
 
 # Noise levels. One data set + one model set + one attack run per level.
 EPS=${EPS:-"0.005 0.01 0.02 0.05"}
