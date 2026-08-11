@@ -57,7 +57,6 @@ SPARSE = False
 SEED = 42
 
 SUITE_STEPS = 50
-SUITE_EPS = (0.005, 0.01, 0.02, 0.05)
 SUITE_WORST = 3
 SUITE_EXAMPLES = 10
 SUITE_TRANSFER_SAMPLES = 5
@@ -876,7 +875,7 @@ def build_init_inputs(args, summary, radon, init_method: str, max_samples: int, 
         split=SPLIT, n_train=N_TRAIN, n_test=N_TEST,
         shuffle=False, num_workers=NUM_WORKERS, data_root=args.data_root,
     )
-    init_recon = InitReconstructor(init_method=init_method, summary=summary, radon=radon)
+    init_recon = InitReconstructor(init_method=init_method, radon=radon)
     proj = lambda y: radon.proj_ran(y)
     return init_recon, proj, build_input_cache(proj, loader, max_samples, device)
 
@@ -1330,8 +1329,6 @@ def run_epoch_study(args) -> None:
     inits, out_root = setup.inits, setup.out_root
 
     eps_nominal = EPOCH_EPS
-    if eps_nominal <= 0:
-        raise ValueError("requires noise_sigma_rel in summary (or --suite-eps).")
 
     study_dir = out_root / "epoch_study"
     study_dir.mkdir(parents=True, exist_ok=True)
@@ -1429,9 +1426,10 @@ def run_attack_suite(args) -> None:
     noise_rel = setup.noise_rel
     inits, attacks_root = setup.inits, setup.out_root
 
-    eps_nominal = SUITE_EPS
+    eps_nominal = args.suite_eps if args.suite_eps is not None else noise_rel
     if eps_nominal <= 0:
-        raise ValueError("requires noise_sigma_rel in summary")
+        raise ValueError(
+            "requires noise_sigma_rel in summary.json, or pass --suite-eps explicitly.")
 
     suite_alpha = suite_step_size(eps_nominal, setup.mean_sino_norm, SUITE_STEPS)
     # eps is a relative L2 fraction: the per-sample budget is eps*||y_i||_2.
@@ -1473,6 +1471,10 @@ def parse():
                              "reconstruction folder detected under --data-root.")
     parser.add_argument("--out-dir", default=None,
                         help="Output directory (default: attacks_n<noise>).")
+    parser.add_argument("--suite-eps", type=float, default=None,
+                        help="Nominal L2 budget (fraction of ||y||) for the attack suite. "
+                             "Default: noise_sigma_rel from summary.json — the training "
+                             "noise level, the principled budget.")
 
     # ---- run size ----
     parser.add_argument("--max-samples", type=int, default=128,
