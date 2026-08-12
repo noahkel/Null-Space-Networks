@@ -992,7 +992,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
     adapters: Dict[str, ModelAttackAdapter] = {}
     for name in model_names:
         m = load_model_checkpoint(init_method=init_method, model_name=name,
-                                  radon=radon, device=device, noise_rel=noise_rel
+                                  radon=radon, device=device, noise_rel=noise_rel,
                                   model_dir=args.model_dir)
         models[name] = m
         adapters[name] = ModelAttackAdapter(model=m, init_reconstructor=init_reconstructor,
