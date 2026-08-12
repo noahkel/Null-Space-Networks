@@ -396,7 +396,7 @@ def load_model_checkpoint(
 ) -> nn.Module:
     base = Path(model_dir) if model_dir else None
     candidates = [
-        Path("checkpoints" / f"init_{init_method}" / f"{model_name}_best.pt")
+        Path("checkpoints") / f"init_{init_method}" / f"{model_name}_best.pt"
     ]
     ckpt_path = next((p for p in candidates if p.exists()), None)
     if ckpt_path is None:
