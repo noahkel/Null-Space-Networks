@@ -864,7 +864,7 @@ def prepare_run(args) -> RunSetup:
         out_root=Path(args.out_dir or f"attacks_n{noise_rel}"),
     )
 
-def build_init_inputs(args, summary, radon, init_method: str, max_samples: int, device):
+def build_init_inputs(args, radon, init_method: str, max_samples: int, device):
     """Loader, init reconstructor, range projector and the shared input cache for
     one init method — identical in both run modes, so it lives once.
 
@@ -952,7 +952,7 @@ def build_example_row(radon, x_gt, clean_init, adv_init, clean_pred, adv_pred,
         # the network input (exact init mode). Both inits are linear, so the
         # identity holds for either.
         e_ran_init_d, _ = decompose_error(
-            init_reconstructor.exact(delta[i:i + 1]), radon)
+            init_reconstructor(delta[i:i + 1]), radon)
         row["proj_ran_init_delta"] = e_ran_init_d.squeeze().numpy()
     return row
 
@@ -984,7 +984,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
     print(f"\n[suite] ===== init '{init_method}'  models={model_names} =====")
 
     init_reconstructor, projector, input_cache = build_init_inputs(
-        args, summary, radon, init_method, MAX_SAMPLES, device)
+        args, radon, init_method, MAX_SAMPLES, device)
 
     # Load every model + adapter once (reused for both attacking and transfer).
     models: Dict[str, nn.Module] = {}
@@ -1342,7 +1342,7 @@ def run_epoch_study(args) -> None:
     wrote_any = False
     for init_method in inits:
         init_reconstructor, projector, input_cache = build_init_inputs(
-            args, summary, radon, init_method, MAX_SAMPLES, device)
+            args, radon, init_method, MAX_SAMPLES, device)
 
         found = detect_suite_models(args.model_dir, init_method)
         if model_filter is not None:
