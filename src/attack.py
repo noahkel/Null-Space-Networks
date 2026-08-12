@@ -392,12 +392,11 @@ def load_model_checkpoint(
     model_name: str,
     radon,
     device: torch.device,
-    noise_rel: float,
     model_dir: Optional[str] = None,
 ) -> nn.Module:
     base = Path(model_dir) if model_dir else None
     candidates = [
-        Path("models_matrices") / str(noise_rel) / f"init_{init_method}" / "checkpoints" / f"{model_name}_best.pt"
+        base / f"init_{init_method}" / "checkpoints" / f"{model_name}_best.pt"
     ]
     ckpt_path = next((p for p in candidates if p.exists()), None)
     if ckpt_path is None:
@@ -992,7 +991,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
     adapters: Dict[str, ModelAttackAdapter] = {}
     for name in model_names:
         m = load_model_checkpoint(init_method=init_method, model_name=name,
-                                  radon=radon, device=device, noise_rel=noise_rel,
+                                  radon=radon, device=device,
                                   model_dir=args.model_dir)
         models[name] = m
         adapters[name] = ModelAttackAdapter(model=m, init_reconstructor=init_reconstructor,
