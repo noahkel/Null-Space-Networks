@@ -1048,7 +1048,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
                 rows.extend(evaluate_batch(
                     x_gt=x_gt, clean_init=clean_init, clean_y=y_clean, clean_pred=clean_pred,
                     adv_init=adv_init, adv_y=y_adv, adv_pred=adv_pred, delta=delta,
-                    success_mse_factor=args.success_mse_factor, radon=radon,
+                    success_mse_factor=SUCCESS_MSE_FACTOR, radon=radon,
                 ))
 
                 # One example-image dict for sample j, shared by the first-K
