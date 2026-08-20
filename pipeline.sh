@@ -143,7 +143,7 @@ SERIAL_TIME=${SERIAL_TIME:-168:00:00}  # --serial chains every stage in one job
 
 # Cap concurrent tasks per array (%N) so one sweep does not take the whole
 # partition. Unset MAX_CONCURRENT for no cap.
-MAX_CONCURRENT=${MAX_CONCURRENT:-4}
+MAX_CONCURRENT=${MAX_CONCURRENT:-2}
 
 
 # =========================================================================== #
