@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from src.unet import UNet
-from src.wrappers import RESNET, NSN, DPNSN, DPNSN_RES
+from src.wrappers import RESNET, NSN
 from typing import List, Union, Dict, Optional
 from src.radon import _RadonBase
 
@@ -138,5 +138,5 @@ def build_models(
             models[name] = NSN(unet=UNet(in_channels=1, out_channels=1), radon=radon)
         else:
             raise ValueError(
-                f"Unknown model '{name}'. Use one of: resnet, nsn, dpnsn, dpnsn_res")
+                f"Unknown model '{name}'. Use one of: resnet, nsn")
     return models
