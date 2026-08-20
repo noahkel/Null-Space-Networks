@@ -143,7 +143,7 @@ SERIAL_TIME=${SERIAL_TIME:-168:00:00}  # --serial chains every stage in one job
 
 # Cap concurrent tasks per array (%N) so one sweep does not take the whole
 # partition. Unset MAX_CONCURRENT for no cap.
-MAX_CONCURRENT=${MAX_CONCURRENT:-4}
+MAX_CONCURRENT=${MAX_CONCURRENT:-2}
 
 
 # =========================================================================== #
@@ -277,7 +277,7 @@ setup_env() {
     echo "Working dir:   $(pwd)"
     echo "Start time:    $(date)"
     echo "============================================"
-    python -c "import torch; print('PyTorch:', torch.__version__, '| CUDA available:', torch.cuda.is_available(), '| Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
+        python -c "import torch; print('PyTorch:', torch.__version__, '| CUDA available:', torch.cuda.is_available(), '| Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
     echo "============================================"
 }
 
@@ -514,6 +514,45 @@ run_submitter() {
         esac
     }
 
+    # How much of the cluster this sweep holds at its widest point. prep runs
+    # alone; attack and epoch depend only on prep, so they overlap and their
+    # requests add up; render follows both. The middle line is the number that
+    # decides whether anyone else can get on the partition while this runs.
+    print_footprint() {
+        local gpu cpu mem tasks label
+        add() {  # <stage> <n-tasks>
+            local k
+            k=$(peak_tasks "$1" "$2")
+            res_for "$1"
+            tasks=$((tasks + k))
+            gpu=$((gpu + k * GPUS))
+            cpu=$((cpu + k * CPUS))
+            mem=$((mem + k * $(mem_gb "$MEM")))
+            label="${label:+$label + }$1"
+        }
+        show() {
+            [ -n "$label" ] || return 0
+            printf "    %-16s %2d task(s) at once -> %2d gpu, %3d cpu, %4d GB\n" \
+                   "$label" "$tasks" "$gpu" "$cpu" "$mem"
+        }
+        reset() { gpu=0 cpu=0 mem=0 tasks=0 label=""; }
+
+        echo "  peak footprint (stages on one line run at the same time):"
+        reset
+        will_submit prep && add prep "$n_prep"
+        show
+        reset
+        will_submit attack && add attack "$n_attack"
+        will_submit epoch  && add epoch  "$n_epoch"
+        show
+        reset
+        will_submit render && add render "$n_render"
+        show
+        echo "    narrow it with MAX_CONCURRENT / <STAGE>_CONCURRENT, shrink a task"
+        echo "    with <STAGE>_CPUS / _MEM / _GPUS (section 1)."
+        [ "$GRES" -eq 1 ] || echo "    (GRES=0 — GPU stages are submitted without --gres)"
+    }
+
     local s
     for s in ${stages//,/ }; do
         case "$s" in
@@ -550,10 +589,26 @@ run_submitter() {
         # "-" marks a stage that will not be submitted, so the plan shows both
         # what the configuration contains and what this invocation will do.
         mark() { if will_submit "$1"; then echo " "; else echo "-"; fi; }
-        printf " %s prep    %2d task(s): %s\n" "$(mark prep)"   "$n_prep"   "$(tasks_prep   | tr '\n' ',' | sed 's/,$//')"
-        printf " %s attack  %2d task(s): %s\n" "$(mark attack)" "$n_attack" "$(tasks_attack | tr '\n' ',' | sed 's/,$//')"
-        printf " %s epoch   %2d task(s): %s\n" "$(mark epoch)"  "$n_epoch"  "$(tasks_epoch  | tr '\n' ',' | sed 's/,$//')"
-        printf " %s render  %2d task(s): %s\n" "$(mark render)" "$n_render" "$(tasks_render | tr '\n' ',' | sed 's/,$//')"
+        # Two lines per stage: what it asks the scheduler for, then the tasks.
+        row() {  # <stage> <n-tasks> <task-list>
+            res_for "$1"
+            local conc cap=""
+            conc=$(concurrency_for "$1")
+            [ -n "$conc" ] && cap=", <=$conc at once"
+            printf " %s %-6s %2d task(s)%s, each %s cpu / %s / %s gpu on '%s'\n" \
+                   "$(mark "$1")" "$1" "$2" "$cap" "$CPUS" "$MEM" "$GPUS" "$PART"
+            printf "          %s\n" "$3"
+        }
+        row prep   "$n_prep"   "$(tasks_prep   | tr '\n' ',' | sed 's/,$//')"
+        row attack "$n_attack" "$(tasks_attack | tr '\n' ',' | sed 's/,$//')"
+        row epoch  "$n_epoch"  "$(tasks_epoch  | tr '\n' ',' | sed 's/,$//')"
+        row render "$n_render" "$(tasks_render | tr '\n' ',' | sed 's/,$//')"
+        echo "-------------------------------------------------------------"
+        print_footprint
+    else
+        res_for all
+        printf "  serial job   1 task, %s cpu / %s / %s gpu on '%s'\n" \
+               "$CPUS" "$MEM" "$GPUS" "$PART"
     fi
     echo "  outputs:"
     tasks_render | sed 's/^/    /'
@@ -593,13 +648,31 @@ run_submitter() {
     exports="$exports,PINV_MODE=$PINV_MODE,EPS=$EPS"
     exports="$exports,CREATE_DATA=$CREATE_DATA,TRAIN=$TRAIN,RUN_EPOCH_STUDY=$RUN_EPOCH_STUDY"
     exports="$exports,MAX_SAMPLES=$MAX_SAMPLES,EPOCH_STUDY_MAX=$EPOCH_STUDY_MAX"
+    # The worker calls res_for as well — for its thread budget, for the CPU-only
+    # guard and for the "GPU stage without a GPU" check — so the resource
+    # profile travels with the job instead of being re-derived from defaults
+    # that may not be what was submitted.
+    exports="$exports,PARTITION=$PARTITION,RENDER_PARTITION=$RENDER_PARTITION"
+    exports="$exports,GPU_TYPE=$GPU_TYPE,GRES=$GRES"
+    local k v n
+    for k in PREP ATTACK EPOCH RENDER SERIAL; do
+        for v in CPUS MEM GPUS WORKERS; do
+            n="${k}_${v}"
+            exports="$exports,$n=${!n}"
+        done
+    done
 
     if [ "$serial" -eq 1 ]; then
         # No array, so %A/%a would render as the NO_VAL sentinel — give the log
         # the plain job-id pattern instead.
-        local jid
+        local jid gres
+        res_for all
+        gres=$(gres_for "$GPUS")
         jid=$(sbatch --parsable --job-name="nsn-serial${VARIANT_TAG}" \
                      --time="$SERIAL_TIME" --mail-type=BEGIN,END,FAIL \
+                     --partition="$PART" --nodes=1 --ntasks=1 \
+                     --cpus-per-task="$CPUS" --mem="$MEM" \
+                     ${gres:+--gres="$gres"} ${NICE:+--nice="$NICE"} \
                      --output="logs/%x_%j.out" --error="logs/%x_%j.err" \
                      --export="$exports,STAGE=all" "$REPO_DIR/pipeline.sh")
         echo "submitted serial  job $jid  (every stage, $(echo $EPS | wc -w) noise level(s))"
@@ -607,14 +680,24 @@ run_submitter() {
         return
     fi
 
-    local pct=""
-    [ -n "$MAX_CONCURRENT" ] && pct="%$MAX_CONCURRENT"
-
     submit() {  # <job-name> <n-tasks> <time> <stage> [dependency-job-id ...]
         local name=$1 n=$2 time=$3 stage=$4
         shift 4
+        res_for "$stage"
+        local conc pct="" gres
+        conc=$(concurrency_for "$stage")
+        [ -n "$conc" ] && pct="%$conc"
+        # Every task-level resource is stated. An sbatch without them takes the
+        # partition default — on this cluster a whole node, GPUs included — and
+        # eight such tasks are the entire partition for two days.
         local args=(--job-name="$name" --array="0-$((n - 1))$pct" --time="$time"
+                    --partition="$PART" --nodes=1 --ntasks=1
+                    --cpus-per-task="$CPUS" --mem="$MEM"
                     --export="$exports,STAGE=$stage")
+        gres=$(gres_for "$GPUS")
+        [ -n "$gres" ] && args+=(--gres="$gres")
+        # Optional: queue behind everyone else's work.
+        [ -n "$NICE" ] && args+=(--nice="$NICE")
         # afterok:<id>:<id> — every listed job must succeed first. Empty ids (a
         # skipped stage) drop out so the dependency is simply shorter.
         local dep="" id
@@ -662,6 +745,10 @@ print_footer() {
     echo
     echo "watch:  squeue -u \$USER"
     echo "logs:   logs/nsn-*_<jobid>_<task>.out"
+    echo "usage:  seff <jobid>       # cpu/memory efficiency of a finished task"
+    echo "        sacct -j <jobid> -o JobID,State,Elapsed,MaxRSS,TotalCPU,AllocTRES%40"
+    echo "        # low efficiency means the request above is too big — trim it"
+    echo "stop:   scancel <jobid>    # or: scancel -u \$USER --name=nsn-attack"
     echo "fetch:  .\\fetch_results.ps1           # all figures + tables"
     echo "        .\\fetch_results.ps1 -Summary  # skip the per-sample images"
 }
