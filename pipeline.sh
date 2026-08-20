@@ -322,8 +322,7 @@ attack_suite() {
     echo "=== [attack] noise=$NOISE data=$DATA_DIR_NOISE models=$MODEL_DIR_NOISE at $(date) ==="
     python -u attack.py --data-root $DATA_DIR_NOISE --model-dir $MODEL_DIR_NOISE \
         --max-samples $MAX_SAMPLES --lipschitz \
-        --lipschitz-samples "$LIPSCHITZ_SAMPLES" \
-        --lipschitz-iters "$LIPSCHITZ_ITERS" --out-dir "$OUT_DIR"
+        --out-dir "$OUT_DIR"
 }
 
 # Scoped to one init and a smaller sample budget. Writes epoch_study/*.csv into
