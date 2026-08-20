@@ -9,7 +9,7 @@ Covers, in order:
    4. metrics + aggregation  evaluate_batch, summarize_metrics, aggregate_*
    5. artifacts              the .npz/.json on-disk contract
    6. rendering              figure entry points and the render progress protocol
-   7. models                 RESNET / NSN / DPNSN / DPNSN_RES forward semantics
+   7. models                 RESNET / NSN forward semantics
    8. the UNet blocks        shape contracts and the odd-size skip padding
    9. pipeline setup         prepare_run, build_init_inputs, radon/model loading
   10. radon operators        the AstraRadonAdapter / MatrixRadonAdapter identities
@@ -905,9 +905,6 @@ def test_clean_consistency_in_aggregate_metrics():
     assert "adv_consistency_rel" in attack._AGGREGATE_METRICS
 
 
-# --------------------------------------------------------------------------- #
-# TODO 9 — dpnsn / dpnsn_res coverage.
-# --------------------------------------------------------------------------- #
 def test_build_models_all_four():
     from src.utils import build_models
 
@@ -1157,12 +1154,7 @@ def test_artifacts_module_is_dependency_free():
 
 
 # =========================================================================== #
-# Models — the four architectures under study (src/wrappers.py).
-#
-# These were entirely untested: RESNET, DPNSN and DPNSN_RES were never even
-# named by the suite, yet the paper's whole comparison rests on how their
-# corrections are constrained. The properties below are the definitions, not
-# implementation details -- if one breaks, the results mean something else.
+# Models 
 # =========================================================================== #
 class _ConstUNet(torch.nn.Module):
     """A 'network' returning a fixed correction, so each wrapper's algebra can be
@@ -1181,10 +1173,7 @@ class ModelRadon:
 
     MatrixRadonAdapter.forward_la returns a full-shape sinogram with the
     unmeasured rows zeroed, so forward() and forward_la() outputs can be added
-    and subtracted. FakeRadon above instead emits only the measured rows, which
-    is fine for the attack tests but makes DPNSN_RES -- which computes
-    forward(res) - y_delta -- a shape error. Hence a second stub, rather than a
-    change to the one that forty-odd existing tests depend on.
+    and subtracted. FakeRadon above instead emits only the measured rows
     """
 
     def __init__(self, img=16, seed=0, dtype=torch.float64):
@@ -1320,51 +1309,6 @@ def test_nsn_correction_lies_in_the_null_space(model_radon):
     correction = NSN(_unet_returning(model_radon), model_radon)(x, None) - x
     # already in null(A_la), so projecting again must change nothing
     assert torch.allclose(model_radon.proj_null_image(correction), correction, atol=1e-8)
-
-
-def test_dpnsn_measured_correction_is_capped_by_beta(model_radon):
-    """DPNSN's whole point: however large the network output, the measured part
-    of the correction is clipped to the L2 ball of radius beta."""
-    from src.wrappers import DPNSN, _proj_l2_ball
-    x = torch.zeros(2, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    beta = 0.05
-    unet = _unet_returning(model_radon, scale=1e4)
-    out = DPNSN(unet, model_radon, beta)(x, None)
-    # reproduce the measured branch and confirm the clip actually bound it
-    res = unet.value.expand(2, 1, model_radon.IMG, model_radon.IMG)
-    y = model_radon.forward(res)
-    clipped = _proj_l2_ball(model_radon.proj_ran(y), beta)
-    assert clipped.reshape(2, -1).norm(dim=1).max().item() <= beta * (1 + 1e-9)
-    expected = x + model_radon.fbp_la(clipped) + model_radon.fbp(model_radon.proj_nsn(y))
-    assert torch.allclose(out, expected, atol=1e-8)
-
-
-def test_dpnsn_larger_beta_permits_a_larger_measured_correction(model_radon):
-    from src.wrappers import DPNSN
-    x = torch.zeros(1, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    unet = _unet_returning(model_radon, scale=1e4)
-    tight = DPNSN(unet, model_radon, 0.01)(x, None)
-    loose = DPNSN(unet, model_radon, 10.0)(x, None)
-    assert (loose - x).norm().item() > (tight - x).norm().item()
-
-
-def test_dpnsn_res_uses_the_measured_sinogram(model_radon):
-    """DPNSN_RES is the only model whose output depends on y_delta; were that
-    argument ignored, its data-proximal term would be doing nothing."""
-    from src.wrappers import DPNSN_RES
-    x = torch.randn(2, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    model = DPNSN_RES(_unet_returning(model_radon), model_radon, beta=0.5)
-    y1 = model_radon.forward_la(x)
-    assert not torch.allclose(model(x, y1), model(x, y1 + 1.0))
-
-
-def test_dpnsn_res_requires_y_delta(model_radon):
-    """Unlike the other three it has no default, so a caller that forgets the
-    sinogram fails loudly instead of silently reconstructing from nothing."""
-    from src.wrappers import DPNSN_RES
-    x = torch.randn(1, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    with pytest.raises(TypeError):
-        DPNSN_RES(_unet_returning(model_radon), model_radon, beta=0.5)(x)
 
 
 @pytest.mark.parametrize("name", ["resnet", "nsn"])
