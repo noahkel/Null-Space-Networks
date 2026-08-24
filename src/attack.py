@@ -255,10 +255,8 @@ def attack_objective(
     #   null        :  mean( (P_N e)^2 )               (structural / learned channel)
     #   zero        : -mean(pred^2)                    (targeted: drive pred -> 0)
     #   target      : -mean((pred - t)^2)              (targeted: drive pred -> t)
-    gt_term = reduce_loss((pred - x_gt) ** 2)
-
     if objective == "mse":
-        return gt_term
+        return reduce_loss((pred - x_gt) ** 2)
 
     if objective == "range":
         # Null-space *complement*: reward only the range (measured) error component
