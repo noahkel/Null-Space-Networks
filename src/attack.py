@@ -85,29 +85,10 @@ def to_numpy_img(x: torch.Tensor) -> np.ndarray:
 def l2_norm_batch(x: torch.Tensor) -> torch.Tensor:
     return torch.linalg.norm(x.reshape(x.shape[0], -1), dim=1)
 
-def linf_norm_batch(x: torch.Tensor) -> torch.Tensor:
-    """Largest absolute entry per sample. A diagnostic (the ``delta_linf``
-    metric column), not a threat model: the attack itself is L2 only."""
-    return x.reshape(x.shape[0], -1).abs().max(dim=1).values
-
 Budget = Union[float, torch.Tensor]
 
 def as_eps_batch(eps: Budget, x: torch.Tensor) -> torch.Tensor:
-    """The one representation of a budget: a broadcastable [B,1,1,1] tensor.
-
-    Every production attack is run with a per-sample budget (``suite_eps_batch``:
-    eps_i = eps_rel * ||y_i||), so a bright and a faint sinogram are attacked at
-    the same relative strength. A plain float is still accepted, meaning "this
-    budget for every sample" — convenient for a one-off call or a test.
-
-    Converting once, here, is what lets the projections and the attack steps
-    below be written for the tensor case only. They used to carry a scalar branch
-    each, which was dead in the suite and drifted: ``project_delta`` was still
-    annotated ``eps: float`` while every real caller passed a tensor.
-
-    A negative budget clamps to 0, which the projections turn into a zero
-    perturbation — the same thing the old scalar early-returns did.
-    """
+    """The one representation of a budget: a broadcastable [B,1,1,1] tensor. """
     if torch.is_tensor(eps):
         vec = eps.to(device=x.device, dtype=x.dtype).reshape(-1)
     else:
@@ -125,11 +106,6 @@ def project_delta(delta: torch.Tensor, eps: Budget,
     """Projection onto the feasible set S = range(P_ran) ∩ {||δ||_2 ≤ ε}."""
     return projector(proj_l2_ball(projector(delta), eps))
 
-def normalize_grad(grad: torch.Tensor) -> torch.Tensor:
-    """Unit-magnitude ascent direction:  ĝ = g / ||g||_2  (steepest ascent under
-    the L2 metric)."""
-    return grad / l2_norm_batch(grad).clamp_min(1e-12).view(-1, 1, 1, 1)
-
 def suite_eps_batch(y_clean: torch.Tensor, eps_nominal: float) -> torch.Tensor:
     """Per-sample budget eps_i for one batch.
 
@@ -142,12 +118,6 @@ def suite_step_size(eps_nominal: float, mean_sino_norm: float, steps: int) -> fl
     same units as the budget."""
     return 2.5 * eps_nominal * max(mean_sino_norm, 1.0) / max(steps, 1)
 
-def random_start_like(y: torch.Tensor, eps: Budget,
-                      projector: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-    # A zero budget needs no special case: the draw projects onto a ball of
-    # radius 0, giving the zero perturbation.
-    return projector(proj_l2_ball(torch.randn_like(y), eps))
-
 def reduce_loss(loss_map: torch.Tensor) -> torch.Tensor:
     if loss_map.ndim <= 1:
         return loss_map.mean()
@@ -155,9 +125,6 @@ def reduce_loss(loss_map: torch.Tensor) -> torch.Tensor:
 
 def per_example_mse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return ((x - y) ** 2).reshape(x.shape[0], -1).mean(dim=1)
-
-def batch_mean_abs(x: torch.Tensor) -> torch.Tensor:
-    return x.abs().reshape(x.shape[0], -1).mean(dim=1)
 
 def confidence_interval_95(values: Iterable[float]) -> Tuple[float, float]:
     arr = np.asarray(list(values), dtype=np.float64)
@@ -321,21 +288,18 @@ def pgd_attack(
         return attack_objective(pred, x_gt, objective, radon=radon, target=target)
 
     for _ in range(SUITE_RESTARTS):
-        delta = random_start_like(y_clean, eps, adapter.projector)
+        delta = adapter.projector(proj_l2_ball(torch.randn_like(y_clean), eps))
         delta = project_delta(delta, eps, adapter.projector)
 
         for _ in range(SUITE_STEPS):
-            with torch.no_grad():
-                y_proj = adapter.projector(y_clean + delta)
             y_adv = (y_clean + delta).detach().requires_grad_(True)
             pred, _, _ = adapter.forward(y_adv, project=False)
             grad = torch.autograd.grad(loss_of(pred), y_adv)[0]
             with torch.no_grad():
-                delta = (y_proj + alpha * normalize_grad(grad)) - y_clean
-                delta = project_delta(delta, eps, adapter.projector)
+                delta = project_delta(delta + alpha * grad / l2_norm_batch(grad).clamp_min(1e-12).view(-1, 1, 1, 1), eps, adapter.projector)
 
         with torch.no_grad():
-            y_adv = adapter.projector(y_clean + delta)
+            y_adv = y_clean + delta
             pred, _, _ = adapter.forward(y_adv, project=False)
             score = float(loss_of(pred).item())
             if score > best_score:
@@ -435,8 +399,8 @@ def evaluate_batch(
     clean_mse_batch = per_example_mse(clean_pred, x_gt)
     adv_mse_batch = per_example_mse(adv_pred, gt_adv)
     delta_l2_batch = l2_norm_batch(delta)
-    delta_linf_batch = linf_norm_batch(delta)
-    sino_shift_batch = batch_mean_abs(delta)
+    delta_linf_batch = delta.reshape(delta.shape[0], -1).abs().max(dim=1).values
+    sino_shift_batch = delta.abs().reshape(delta.shape[0], -1).mean(dim=1)
 
     for i in range(batch_size):
         gt_np = to_numpy_img(x_gt[i])
