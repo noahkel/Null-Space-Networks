@@ -771,7 +771,7 @@ class MatrixRadonAdapter(_RadonBase):
         finally:
             astra.projector.delete(proj_id)
 
-        csr = csr.astype(self.dtype.name)
+        csr = csr.astype(np.float32 if self.dense else np.float64)
 
         # Full system matrix
         self._A = self._csr_to_torch(csr)
