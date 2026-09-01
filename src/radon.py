@@ -771,7 +771,7 @@ class MatrixRadonAdapter(_RadonBase):
         finally:
             astra.projector.delete(proj_id)
 
-        csr = csr.astype(np.float64)
+        csr = csr.astype(self.dtype)
 
         # Full system matrix
         self._A = self._csr_to_torch(csr)
@@ -832,14 +832,9 @@ class MatrixRadonAdapter(_RadonBase):
                     )
             return U_k, s_k, Vt_k
 
-
-
-
-
         # ------------------------------------------------------------------
         # GPU path: full thin SVD via MAGMA (single pass, no cuSOLVER limits)
         # ------------------------------------------------------------------
-
 
         if self.device.type == "cuda":
             mem_gb = m * n * 8 / 1e9  # float64

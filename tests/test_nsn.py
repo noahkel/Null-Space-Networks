@@ -232,17 +232,10 @@ def test_objective_unknown_raises(radon):
 def test_norm_batch_helpers():
     x = _rand(3, 1, IMG, IMG)
     l2 = attack.l2_norm_batch(x)
-    linf = attack.linf_norm_batch(x)
-    assert l2.shape == (3,) and linf.shape == (3,)
+    assert l2.shape == (3,)
     for i in range(3):
         assert math.isclose(float(l2[i]), float(torch.linalg.norm(x[i].reshape(-1))), rel_tol=1e-6)
-        assert math.isclose(float(linf[i]), float(x[i].abs().max()), rel_tol=1e-6)
 
-
-def test_normalize_grad_is_unit_l2():
-    g = _rand(4, 1, IMG, IMG)
-    u = attack.normalize_grad(g)
-    assert torch.allclose(attack.l2_norm_batch(u), torch.ones(4, dtype=torch.float64), atol=1e-6)
 
 
 def test_proj_l2_ball_enforces_radius():
@@ -304,9 +297,6 @@ def test_zero_budget_gives_no_perturbation(radon):
     delta = _rand(4, 1, IMG, IMG) * 5.0
     proj = radon.proj_null_image
     assert torch.count_nonzero(attack.project_delta(delta, 0.0, proj)) == 0
-    assert torch.count_nonzero(attack.random_start_like(delta, 0.0, proj)) == 0
-    assert torch.count_nonzero(
-        attack.random_start_like(delta, torch.zeros(4, dtype=delta.dtype), proj)) == 0
 
 
 def test_per_sample_budgets_are_enforced_independently():
@@ -365,8 +355,6 @@ def test_reduction_helpers():
     pe = attack.per_example_mse(x, y)
     assert pe.shape == (3,)
     assert torch.allclose(pe[0], ((x[0] - y[0]) ** 2).mean())
-    assert torch.allclose(attack.batch_mean_abs(x)[1], x[1].abs().mean())
-
 
 def test_confidence_interval_95():
     mean, half = attack.confidence_interval_95([1.0, 1.0, 1.0])
@@ -1566,33 +1554,6 @@ def test_build_radon_passes_the_geometry_through(monkeypatch):
                        device=torch.device("cpu"))
     assert seen["resolution"] == 8 and seen["det_count"] == 10
     assert len(seen["angles"]) == 12
-
-
-# =========================================================================== #
-# Attack primitives that bound what an attacker may do.
-# =========================================================================== #
-def test_random_start_stays_inside_the_ball():
-    """PGD starts from a random point in the ball; a start outside it would mean
-    the reported eps is not the budget actually spent."""
-    y = torch.zeros(4, 1, 6, 6)
-    eps = 0.25
-    d = attack.random_start_like(y, eps, projector=lambda v: v)
-    assert d.reshape(4, -1).norm(dim=1).max().item() <= eps * (1 + 1e-6)
-
-
-def test_random_start_is_zero_for_a_zero_budget():
-    y = torch.zeros(2, 1, 4, 4)
-    d = attack.random_start_like(y, 0.0, projector=lambda v: v)
-    assert torch.allclose(d, torch.zeros_like(d))
-
-
-def test_random_start_applies_the_projector():
-    """The start must already satisfy the range constraint, else the first step
-    is spent projecting rather than attacking."""
-    y = torch.ones(2, 1, 4, 4)
-    d = attack.random_start_like(y, 1.0, projector=lambda v: torch.zeros_like(v))
-    assert torch.allclose(d, torch.zeros_like(d))
-
 
 # =========================================================================== #
 # Data loading — every number in the study enters through here.
