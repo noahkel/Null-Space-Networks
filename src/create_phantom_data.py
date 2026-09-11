@@ -8,7 +8,9 @@ For each sample, the pipeline:
   4. writes a summary.json with the geometry and noise statistics used by
      train.py and attack.py.
 
-Entry point: create_data.py.
+Run it as a module, so the ``src.`` imports resolve:
+
+    python -m src.create_phantom_data --noise 0.01 --out_dir ./data
 """
 import argparse
 import json
@@ -184,3 +186,7 @@ def main() -> None:
         json.dump(summary, f, indent=2)
 
     print("Done. Data saved to:", OUT_DIR.resolve())
+
+
+if __name__ == "__main__":
+    main()

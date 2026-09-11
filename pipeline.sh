@@ -66,7 +66,7 @@ cd "$REPO_DIR" || exit 1
 # 1. Configuration — every knob, overridable from the submitting shell.
 # =========================================================================== #
 
-CREATE_SCRIPT=create_data.py
+CREATE_SCRIPT=src.create_phantom_data
 
 # ── Radon backend ────────────────────────────────────────────────────────────
 # One backend: MatrixRadonAdapter, the explicit A_la matrix with a truncated-SVD
@@ -279,7 +279,7 @@ finish() {
 #    byte-identical commands.
 # =========================================================================== #
 create_data() {
-    python -u "$CREATE_SCRIPT" --img_size $IMG_SIZE --noise $NOISE \
+    python -u -m "$CREATE_SCRIPT" --img_size $IMG_SIZE --noise $NOISE \
         --min_angle $MIN_ANGLE --max_angle $MAX_ANGLE --num_thetas $NUM_THETAS \
         --n_samples $N_SAMPLES \
         --out_dir $DATA_BASE

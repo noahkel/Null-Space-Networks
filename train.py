@@ -106,7 +106,7 @@ def main(out_dir, data_dir, models, checkpoint_every=0):
     NUM_WORKERS = 2
 
     # -------------------------
-    # Load summary produced by create_data.py
+    # Load summary produced by src/create_phantom_data.py
     # -------------------------
     summary_path = DATA_ROOT / "summary.json"
     print(f"Loading summary from: {summary_path}")
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--out_dir", type=str, default='./')
     parser.add_argument("--data_dir", type=str, default='./',
-                        help="A single data directory produced by create_data.py "
+                        help="A single data directory produced by src/create_phantom_data.py "
                              "(e.g. ./data/0.01), containing summary.json and the "
                              "gt/sino/pinv folders.")
     parser.add_argument("--models", type=str, default="resnet,nsn")

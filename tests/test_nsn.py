@@ -804,8 +804,7 @@ def test_build_models_all_four():
 
 
 def test_detect_suite_models_finds_both(tmp_path):
-    init = "fbp"
-    ck = tmp_path / f"init_{init}" / "checkpoints"
+    ck = tmp_path / f"init_{attack.INIT_NAME}" / "checkpoints"
     ck.mkdir(parents=True)
     for m in ("resnet", "nsn"):
         (ck / f"{m}_best.pt").write_bytes(b"x")
@@ -850,7 +849,7 @@ def test_attack_overview_includes_worst_montage(tmp_path):
 # TODO 8 — per-epoch weight tracking + epoch-attack study.
 # --------------------------------------------------------------------------- #
 def test_detect_epoch_checkpoints_orders_and_ignores_best(tmp_path):
-    ck = tmp_path / "init_fbp" / "checkpoints"
+    ck = tmp_path / f"init_{attack.INIT_NAME}" / "checkpoints"
     ck.mkdir(parents=True)
     for e in (10, 1, 5, 2):
         (ck / f"nsn_epoch{e:03d}.pt").write_bytes(b"x")
@@ -860,7 +859,7 @@ def test_detect_epoch_checkpoints_orders_and_ignores_best(tmp_path):
 
 
 def test_load_epoch_history(tmp_path):
-    ck = tmp_path / "init_fbp" / "checkpoints"
+    ck = tmp_path / f"init_{attack.INIT_NAME}" / "checkpoints"
     ck.mkdir(parents=True)
     (ck / "nsn_history.json").write_text(json.dumps({
         "best_epoch": 5,
@@ -1134,19 +1133,17 @@ def test_model_radon_stub_matches_the_real_sinogram_convention(model_radon):
 
 
 def test_proj_l2_ball_is_identity_inside_and_shrinks_outside():
-    from src.wrappers import _proj_l2_ball
-    v = torch.tensor([[[[3.0, 4.0]]]])                        # norm 5
-    assert torch.allclose(_proj_l2_ball(v, 10.0), v)          # inside: untouched
-    out = _proj_l2_ball(v, 1.0)
-    assert out.norm().item() == pytest.approx(1.0, rel=1e-6)  # outside: on the sphere
-    assert torch.allclose(out, v / 5.0)                       # direction preserved
+    v = torch.tensor([[[[3.0, 4.0]]]])                              # norm 5
+    assert torch.allclose(attack.proj_l2_ball(v, 10.0), v)          # inside: untouched
+    out = attack.proj_l2_ball(v, 1.0)
+    assert out.norm().item() == pytest.approx(1.0, rel=1e-6)        # outside: on the sphere
+    assert torch.allclose(out, v / 5.0)                             # direction preserved
 
 
 def test_proj_l2_ball_is_per_sample():
     """A batched projection must not let one large sample shrink the others."""
-    from src.wrappers import _proj_l2_ball
     v = torch.stack([torch.full((1, 2, 2), 0.1), torch.full((1, 2, 2), 100.0)])
-    out = _proj_l2_ball(v, 1.0)
+    out = attack.proj_l2_ball(v, 1.0)
     assert torch.allclose(out[0], v[0])
     assert out[1].norm().item() == pytest.approx(1.0, rel=1e-6)
 
@@ -1155,7 +1152,7 @@ def test_resnet_is_exactly_input_plus_correction(model_radon):
     from src.wrappers import RESNET
     unet = _unet_returning(model_radon)
     x = torch.randn(3, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    assert torch.allclose(RESNET(unet)(x, None), x + unet.value.expand_as(x))
+    assert torch.allclose(RESNET(unet)(x), x + unet.value.expand_as(x))
 
 
 def test_resnet_is_not_data_consistent(model_radon):
@@ -1163,7 +1160,7 @@ def test_resnet_is_not_data_consistent(model_radon):
     measured channel. If this ever passed, the NSN comparison would be vacuous."""
     from src.wrappers import RESNET
     x = torch.randn(2, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    out = RESNET(_unet_returning(model_radon))(x, None)
+    out = RESNET(_unet_returning(model_radon))(x)
     assert not torch.allclose(model_radon.forward_la(out),
                               model_radon.forward_la(x), atol=1e-6)
 
@@ -1177,7 +1174,7 @@ def test_nsn_output_is_data_consistent_by_construction(model_radon, scale):
     say anything (see test_adv_consistency_vs_clean_is_not_trivially_zero)."""
     from src.wrappers import NSN
     x = torch.randn(4, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    out = NSN(_unet_returning(model_radon, scale=scale), model_radon)(x, None)
+    out = NSN(_unet_returning(model_radon, scale=scale), model_radon)(x)
     assert torch.allclose(model_radon.forward_la(out),
                           model_radon.forward_la(x), atol=1e-7)
 
@@ -1185,7 +1182,7 @@ def test_nsn_output_is_data_consistent_by_construction(model_radon, scale):
 def test_nsn_correction_lies_in_the_null_space(model_radon):
     from src.wrappers import NSN
     x = torch.randn(2, 1, model_radon.IMG, model_radon.IMG, dtype=model_radon.dtype)
-    correction = NSN(_unet_returning(model_radon), model_radon)(x, None) - x
+    correction = NSN(_unet_returning(model_radon), model_radon)(x) - x
     # already in null(A_la), so projecting again must change nothing
     assert torch.allclose(model_radon.proj_null_image(correction), correction, atol=1e-8)
 
@@ -1293,27 +1290,26 @@ def _summary_dict(**over):
     d = {"dataset": "ellipses", "img_size": 8, "num_angles": 12, "det_count": 10,
          "angles": [0.0] * 12, "dx": 1.0, "phi": [0.0, 2.0],
          "noise_sigma_rel": 0.02, "mean_norm_y": 7.0,
-         "mean_norm_y_minus_y_delta": 0.5}
+         "mean_norm_y_minus_y_delta": 0.5, "svd_threshold": 4e-3}
     d.update(over)
     return d
 
 
-def _data_root(tmp_path, inits=("pinv", "fbp"), **over):
-    """Minimal data directory: summary.json plus one .npy per init folder, which
-    is all detect_data_inits looks at."""
+def _data_root(tmp_path, with_init=True, **over):
+    """Minimal data directory: summary.json plus one .npy in the init folder,
+    which is all prepare_run looks at."""
     root = tmp_path / "data"
     root.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(_summary_dict(**over)))
-    for init in inits:
-        d = root / init
+    if with_init:
+        d = root / attack.INIT_NAME
         d.mkdir(exist_ok=True)
         np.save(d / "00000.npy", np.zeros((8, 8), dtype=np.float32))
     return root
 
 
 def _prep_args(root, **over):
-    a = dict(data_root=str(root), model_dir=None, out_dir=None, type=None, init=None,
-             seed=0, fp64=False, sparse_radon=False, suite_eps=None)
+    a = dict(data_root=str(root), model_dir=None, out_dir=None, suite_eps=None)
     a.update(over)
     return argparse.Namespace(**a)
 
@@ -1338,10 +1334,10 @@ def test_prepare_run_out_root_defaults_to_the_noise_level(tmp_path, monkeypatch)
     assert explicit.out_root.name == "somewhere"
 
 
-def test_prepare_run_rejects_a_data_root_without_inits(tmp_path, monkeypatch):
-    """Silently looping zero times is how the epoch study used
-    to fail; all three modes must now say so."""
-    root = _data_root(tmp_path, inits=())
+def test_prepare_run_rejects_a_data_root_without_the_init_folder(tmp_path, monkeypatch):
+    """Silently doing nothing is how the epoch study used to fail; both modes
+    must now say so."""
+    root = _data_root(tmp_path, with_init=False)
     monkeypatch.setattr(attack, "build_radon", lambda *a, **k: object())
     with pytest.raises(FileNotFoundError):
         attack.prepare_run(_prep_args(root))
