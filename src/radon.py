@@ -1,19 +1,16 @@
-"""Radon operators for limited-angle CT.
+"""Radon operator for limited-angle CT.
 
-One module, two backends behind the same interface (``_RadonBase``):
+One backend: ``MatrixRadonAdapter`` builds the explicit sparse system matrices A
+(all angles) and A_la (the measured angles only) with the ASTRA Toolbox, and
+keeps a truncated SVD of A_la. That makes the pseudoinverse, the range projector
+and the null-space projector exact tensor algebra rather than the output of an
+iterative solver -- and, because they are ordinary tensor products, PyTorch
+differentiates them, which is what lets an attack gradient travel from the image
+back into the sinogram.
 
-  * ``AstraRadonAdapter``  — matrix-free forward/backprojection through the ASTRA
-    Toolbox, wrapped in autograd Functions so gradients flow. Null-space
-    projection and the error decomposition fall back to conjugate gradients.
-  * ``MatrixRadonAdapter`` — explicit sparse system matrices A and A_la plus
-    their truncated SVDs, so the pseudoinverse, the range projector and the
-    null-space projector are exact tensor algebra (and differentiable). This is
-    the backend every result uses (``matrix_mode=1``).
-
-Shapes are the same for both: images are (B, C, res, res) and sinograms are
-(B, C, n_angles, det_count) — the limited-angle operators return a *full-shape*
-sinogram with the unmeasured rows zeroed, so the two backends are drop-in
-interchangeable.
+Images are (B, C, res, res) and sinograms are (B, C, n_angles, det_count): the
+limited-angle operators return a *full-shape* sinogram with the unmeasured rows
+zeroed, so every sinogram in a run has the same shape.
 """
 import hashlib
 import math
@@ -25,600 +22,21 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse
 import torch
-import torch.nn.functional as F
 
-
-def construct_fourier_filter_torch(size: int, filter_name: str, device, dtype=torch.float32) -> torch.Tensor:
-    """
-    Build the Fourier-domain filter as a 1D torch tensor of shape (size,).
-    """
-    if size % 2 != 0:
-        raise ValueError(f"size must be even, got {size}")
-
-    filter_name = filter_name.lower()
-
-    # Create spatial-domain impulse response f, then FFT -> frequency filter
-    n = torch.cat(
-        (
-            torch.arange(1, size // 2 + 1, 2, device=device, dtype=torch.int64),
-            torch.arange(size // 2 - 1, 0, -2, device=device, dtype=torch.int64),
-        ),
-        dim=0,
-    )
-
-    f = torch.zeros(size, device=device, dtype=dtype)
-    f[0] = 0.25
-    f[1::2] = -1.0 / (math.pi * n.to(dtype)) ** 2
-
-    fourier_filter = 2.0 * torch.real(torch.fft.fft(f))
-
-    if filter_name in ("ramp", "ram-lak"):
-        pass
-
-    elif filter_name == "shepp-logan":
-        # omega = pi * freq, skip DC
-        omega = math.pi * torch.fft.fftfreq(size, device=device, dtype=dtype)[1:]
-        fourier_filter[1:] *= torch.sin(omega) / omega
-
-    elif filter_name == "cosine":
-        freq = torch.linspace(0, math.pi, size, device=device, dtype=dtype, requires_grad=False)
-        cosine_filter = torch.fft.fftshift(torch.sin(freq))
-        fourier_filter *= cosine_filter
-
-    elif filter_name == "hamming":
-        fourier_filter *= torch.fft.fftshift(torch.hamming_window(size, device=device, dtype=dtype))
-
-    elif filter_name == "hann":
-        fourier_filter *= torch.fft.fftshift(torch.hann_window(size, device=device, dtype=dtype))
-
-    else:
-        raise ValueError(
-            f"Unknown filter type '{filter_name}'. "
-            "Available: 'ramp'/'ram-lak', 'shepp-logan', 'cosine', 'hamming', 'hann'."
-        )
-
-    return fourier_filter  # (size,)
-
-
-def filter_sinogram(
-    Y: torch.Tensor,
-    filter_name: str = "ramp",
-    fourier_filter_cache: Optional[dict] = None,
-) -> torch.Tensor:
-    """
-    Apply FBP-style 1D frequency filtering to sinograms in shape (B, C, H, W),
-    filtering along W (detectors). Assumes H = angles.
-
-    Args:
-        Y: (B, C, H, W) tensor
-        filter_name: filter type
-        fourier_filter_cache: optional dict to cache filters by padded_size/device/dtype/name
-
-    Returns:
-        Filtered tensor with same shape as Y.
-    """
-    if Y.ndim != 4:
-        raise ValueError(f"Expected input of shape (B, C, H, W), got {tuple(Y.shape)}")
-
-    device = Y.device
-    real_dtype = torch.float32 if Y.dtype in (torch.float16, torch.bfloat16) else Y.dtype
-    B, C, n_angles, size = Y.shape
-
-    # padded_size = max(64, next_pow2(2*size))
-    padded_size = max(64, 1 << math.ceil(math.log2(2 * size)))
-    pad = padded_size - size
-
-    # Pad on the last dimension only
-    Yf = F.pad(Y.to(real_dtype), (0, pad))  # (B, C, H, padded_size)
-
-    # FFT along detector axis
-    sino_fft = torch.fft.fft(Yf, dim=-1)  # complex
-
-    # Build / cache filter
-    cache_key = None
-    if fourier_filter_cache is not None:
-        cache_key = (padded_size, filter_name, device.type, str(device), str(real_dtype))
-        f = fourier_filter_cache.get(cache_key)
-    else:
-        f = None
-
-    if f is None:
-        f = construct_fourier_filter_torch(padded_size, filter_name, device=device, dtype=real_dtype)
-        # make complex for multiplication with FFT
-        f = f.to(torch.complex64 if real_dtype == torch.float32 else torch.complex128)
-        if fourier_filter_cache is not None:
-            fourier_filter_cache[cache_key] = f
-
-    # Broadcast multiply: (B,C,H,W) * (W,)
-    filtered_fft = sino_fft * f.view(1, 1, 1, -1)
-
-    # iFFT back, crop, scale
-    filtered = torch.fft.ifft(filtered_fft, dim=-1).real  # (B,C,H,padded_size)
-    filtered = filtered[..., :size]  # (B,C,H,W)
-    filtered = filtered * (math.pi / (2.0 * n_angles))
-
-    return filtered.to(dtype=Y.dtype)
-
-
-# ---------------------------------------------------------------------------
-# Shared base class
-# ---------------------------------------------------------------------------
-
-class _RadonBase:
-    """
-    Base class for Radon adapter implementations.
-
-    Provides limited-angle masking, FBP, power-iteration norm estimation and
-    the CG null-space projection / error decomposition that a backend without
-    SVD factors falls back to.
-
-    Subclasses must implement `forward` and `backward` and set
-    the following attributes in their ``__init__``:
-
-        resolution, det_count, angles (np.ndarray), dx, device, dtype, phi,
-        norm_A, norm_A2,
-        _ran_mask (torch.Tensor, shape 1×1×n_angles×det_count),
-        _nsn_mask (torch.Tensor, same shape).
-    """
-
-    # ------------------------------------------------------------------
-    # Mask helpers
-    # ------------------------------------------------------------------
-
-    def _build_ran_mask_np(self) -> np.ndarray:
-        """
-        Build a limited-angle mask selecting angles in [lo, hi).
-
-        Returns
-        -------
-        mask : np.ndarray, shape (1, 1, n_angles, det_count)
-            1.0 for angles in-range, 0.0 otherwise.
-        """
-        lo, hi = self.phi
-        ang_mask = ((self.angles >= lo) & (self.angles < hi)).astype(np.float32)
-        mask2d = np.repeat(ang_mask.reshape(-1, 1), self.det_count, axis=1)
-        return mask2d[None, None, :, :].astype(np.float32)
-
-    def _build_null_mask_np(self) -> np.ndarray:
-        """Complement mask: 1 where angles are NOT in [lo, hi), 0 otherwise."""
-        return 1.0 - self._build_ran_mask_np()
-
-    # ------------------------------------------------------------------
-    # Abstract interface (implemented by subclasses)
-    # ------------------------------------------------------------------
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def backward(self, y: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    # ------------------------------------------------------------------
-    # Limited-angle and FBP methods
-    # ------------------------------------------------------------------
-
-    def proj_ran(self, y: torch.Tensor) -> torch.Tensor:
-        """Project onto the 'range' (selected) angle set: y * ran_mask."""
-        return y * self._ran_mask.to(device=y.device, dtype=y.dtype)
-
-    def forward_la(self, x: torch.Tensor) -> torch.Tensor:
-        """Limited-angle forward projection: y = P_phi (A x)."""
-        return self.proj_ran(self.forward(x))
-
-    def backward_la(self, y: torch.Tensor) -> torch.Tensor:
-        """Limited-angle backprojection: x = A^T (P_phi y)."""
-        return self.backward(self.proj_ran(y))
-
-    def fbp(self, y: torch.Tensor, filter_name: str = "ram-lak") -> torch.Tensor:
-        """Full-angle filtered backprojection: x = A^T( F(y) )."""
-        return self.backward(filter_sinogram(y, filter_name=filter_name))
-
-    def fbp_la(self, y: torch.Tensor, filter_name: str = "ram-lak") -> torch.Tensor:
-        """Limited-angle filtered backprojection: x = A^T( F(P_phi y) )."""
-        return self.backward(filter_sinogram(self.proj_ran(y), filter_name=filter_name))
-
-    def proj_nsn(self, y: torch.Tensor) -> torch.Tensor:
-        """Project onto the 'null' (complement) angle set: y * nsn_mask."""
-        return y * self._nsn_mask.to(device=y.device, dtype=y.dtype)
-
-    
-    def proj_null_image(self, v: torch.Tensor, iters: int = 50, tol: float = 1e-6) -> torch.Tensor:
-        """
-        Project image v onto null(A_la): returns v - A_la^+ A_la v.
-
-        Uses conjugate gradients to solve A_la^T A_la x = A_la^T v, then
-        returns v - x. Differentiable; subclasses may override with a faster
-        exact implementation (e.g. via truncated SVD factors).
-        """
-
-        def AtA(x: torch.Tensor) -> torch.Tensor:
-            return self.backward_la(self.forward_la(x))
-
-        b = AtA(v)
-        x = torch.zeros_like(v)
-        r = b.clone()
-        p = r.clone()
-        rr = (r * r).sum()
-
-        for _ in range(iters):
-            if rr.item() < tol ** 2:
-                break
-            Ap = AtA(p)
-            alpha = rr / (p * Ap).sum().clamp_min(1e-12)
-            x = x + alpha * p
-            r = r - alpha * Ap
-            rr_new = (r * r).sum()
-            p = r + (rr_new / rr.clamp_min(1e-12)) * p
-            rr = rr_new
-
-        return v - x
-
-    def decompose_error(self, e: torch.Tensor, iters: int = 50, tol: float = 1e-6):
-        """
-        Decompose error e = e_ran + e_null where:
-          e_ran  = A_la^+ A_la e   (range component, visible to measurements)
-          e_null = e - e_ran       (null-space component, invisible)
-
-        Uses CG to approximate A_la^+ A_la; subclasses with SVD factors
-        (e.g. MatrixRadonAdapter) override this with an exact decomposition.
-
-        Returns
-        -------
-        (e_ran, e_null) : Tuple[torch.Tensor, torch.Tensor]
-        """
-        e_null = self.proj_null_image(e, iters=iters, tol=tol)
-        return e - e_null, e_null
-
-    # ------------------------------------------------------------------
-    # Operator norm estimation
-    # ------------------------------------------------------------------
-
-    @torch.no_grad()
-    def _estimate_operator_norm(
-        self,
-        iters: int = 20,
-        tol: float = 1e-6,
-        seed: int = 0,
-    ) -> None:
-        """
-        Estimate ||A|| and ||A||^2 via power iteration on A^T A.
-
-        Sets self.norm_A2 and self.norm_A.
-        """
-        g = torch.Generator(device=self.device)
-        g.manual_seed(seed)
-
-        x = torch.randn(
-            (1, 1, self.resolution, self.resolution),
-            device=self.device,
-            dtype=self.dtype,
-            generator=g,
-        )
-        x /= x.norm() + 1e-12
-
-        last_lambda = None
-        lam = None
-
-        for _ in range(iters):
-            y = self.forward(x)
-            x_new = self.backward(y)
-
-            lam = (x_new * x).sum().abs().item() / (x * x).sum().clamp_min(1e-12).item()
-            x = x_new / (x_new.norm() + 1e-12)
-
-            if last_lambda is not None:
-                if abs(lam - last_lambda) / max(lam, 1e-12) < tol:
-                    break
-            last_lambda = lam
-
-        self.norm_A2 = float(lam if lam is not None else 0.0)
-        self.norm_A = float(math.sqrt(self.norm_A2))
-
-
-# ---------------------------------------------------------------------------
-# Differentiable ASTRA autograd wrappers
-# ---------------------------------------------------------------------------
-
-def _astra_batch(x: torch.Tensor, single_fn, out_shape: tuple) -> torch.Tensor:
-    x_np = x.detach().cpu().float().numpy()
-    out = np.empty(out_shape, dtype=np.float32)
-    B, C = x.shape[:2]
-    for b in range(B):
-        for c in range(C):
-            out[b, c] = single_fn(x_np[b, c])
-    return torch.from_numpy(out).to(device=x.device, dtype=x.dtype)
-    
-class _AstraFP(torch.autograd.Function):
-    """
-    Differentiable forward projection via ASTRA.
-
-    forward : x (B,C,H,W) -> FP(x) (B,C,n_angles,det_count)
-    backward: grad_out     -> BP(grad_out)   [adjoint of FP]
-    """
-
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, adapter: "AstraRadonAdapter") -> torch.Tensor:
-        ctx.adapter = adapter
-        B, C = x.shape[:2]
-        return _astra_batch(x, adapter._fp_single, (B, C, len(adapter.angles), adapter.det_count))
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        adapter = ctx.adapter
-        B, C = grad_output.shape[:2]
-        grad = _astra_batch(grad_output, adapter._bp_single, (B, C, adapter.resolution, adapter.resolution))
-        return grad, None
-
-
-class _AstraBP(torch.autograd.Function):
-    """
-    Differentiable backprojection via ASTRA.
-
-    forward : y (B,C,n_angles,det_count) -> BP(y) (B,C,H,W)
-    backward: grad_out                   -> FP(grad_out)   [adjoint of BP]
-    """
-
-    @staticmethod
-    def forward(ctx, y: torch.Tensor, adapter: "AstraRadonAdapter") -> torch.Tensor:
-        ctx.adapter = adapter
-        B, C = y.shape[:2]
-        return _astra_batch(y, adapter._bp_single, (B, C, adapter.resolution, adapter.resolution))
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        adapter = ctx.adapter
-        B, C = grad_output.shape[:2]
-        grad = _astra_batch(grad_output, adapter._fp_single, (B, C, len(adapter.angles), adapter.det_count))
-        return grad, None
-
-
-# ---------------------------------------------------------------------------
-# ASTRA Toolbox backend
-# ---------------------------------------------------------------------------
-
-class AstraRadonAdapter(_RadonBase):
-    """
-    Radon adapter backed by the ASTRA Toolbox.
-
-    The ASTRA Toolbox must be installed separately::
-
-        conda install -c astra-toolbox astra-toolbox             # CPU
-        conda install -c astra-toolbox/label/cuda astra-toolbox  # GPU
-
-    Parameters
-    ----------
-    resolution : int
-        Square image side length (pixels).
-    angles : np.ndarray
-        Projection angles in radians.
-    det_count : int
-        Number of detector elements.
-    clip_to_circle : bool
-        Not supported; a warning is issued if True.
-    dataset : str or None
-        Optional label (stored, not used internally).
-    dx : float
-        Pixel-spacing scale factor. forward multiplies by dx, backward divides by dx.
-    estimate_norm : bool
-        Run power iteration to estimate ``norm_A`` and ``norm_A2``.
-    norm_iters : int
-        Maximum power-iteration steps.
-    device : torch.device or None
-        Target device for output tensors and norm estimation.
-    dtype : torch.dtype
-        Floating-point dtype.
-    phi : (float, float) or None
-        Limited-angle window ``[lo, hi)`` in radians.
-
-    Notes
-    -----
-    ASTRA operates on NumPy arrays internally.  Input tensors are moved to
-    CPU for projection (as float32) and the result is moved back to the
-    original device.  For GPU workflows the CUDA algorithms run on ASTRA's
-    own GPU memory; the tensor-to-numpy copy is the only overhead.
-    """
-
-    def __init__(
-        self,
-        resolution: int,
-        angles: np.ndarray,
-        det_count: int,
-        clip_to_circle: bool = False,
-        dataset: Union[str, None] = None,
-        dx: float = 1.0,
-        estimate_norm: bool = True,
-        norm_iters: int = 20,
-        device: Optional[torch.device] = None,
-        dtype: torch.dtype = torch.float64,
-        phi: Optional[Tuple[float, float]] = None,
-    ):
-        try:
-            import astra as _astra
-        except ImportError:
-            raise ImportError(
-                "astra-toolbox is required. Install with:\n"
-                "  conda install -c astra-toolbox astra-toolbox\n"
-                "  # or for CUDA support:\n"
-                "  conda install -c astra-toolbox/label/cuda astra-toolbox"
-            )
-        self._astra = _astra
-
-        if clip_to_circle:
-            import warnings
-            warnings.warn(
-                "clip_to_circle=True is not supported by AstraRadonAdapter; ignoring.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-        self.resolution = int(resolution)
-        self.det_count = int(det_count)
-        self.angles = np.asarray(angles, dtype=np.float64)
-        self.dx = float(dx)
-        self.dataset = (dataset or "").lower()
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = dtype
-        self.phi = phi
-        self.norm_A: Optional[float] = None
-        self.norm_A2: Optional[float] = None
-
-        # ASTRA geometry descriptors
-        self._vol_geom = _astra.create_vol_geom(self.resolution, self.resolution)
-        self._proj_geom = _astra.create_proj_geom(
-            'parallel', 1.0, self.det_count, self.angles
-        )
-
-        # Use GPU algorithms only if the device is CUDA and ASTRA has CUDA
-        self._use_gpu = (
-            str(self.device).startswith('cuda') and _astra.use_cuda()
-        )
-
-        # CPU projector (not needed for GPU path)
-        if not self._use_gpu:
-            self._proj_id: Optional[int] = _astra.create_projector(
-                'strip', self._proj_geom, self._vol_geom
-            )
-        else:
-            self._proj_id = None
-
-        # Build masks
-        self._ran_mask_np = self._build_ran_mask_np()
-        self._nsn_mask_np = self._build_null_mask_np()
-        self._ran_mask = torch.from_numpy(self._ran_mask_np).to(device=self.device, dtype=self.dtype)
-        self._nsn_mask = torch.from_numpy(self._nsn_mask_np).to(device=self.device, dtype=self.dtype)
-
-        if estimate_norm:
-            self._estimate_operator_norm(iters=norm_iters)
-
-    # ------------------------------------------------------------------
-    # Single-image ASTRA calls
-    # ------------------------------------------------------------------
-
-    def _fp_single(self, x_np: np.ndarray) -> np.ndarray:
-        """
-        Forward project one image.
-
-        Parameters
-        ----------
-        x_np : np.ndarray, shape (resolution, resolution), float32
-
-        Returns
-        -------
-        np.ndarray, shape (n_angles, det_count), float32
-        """
-        astra = self._astra
-        vol_id = astra.data2d.create('-vol', self._vol_geom, data=x_np)
-        sino_id = astra.data2d.create('-sino', self._proj_geom)
-        try:
-            if self._use_gpu:
-                cfg = astra.astra_dict('FP_CUDA')
-            else:
-                cfg = astra.astra_dict('FP')
-                cfg['ProjectorId'] = self._proj_id
-            cfg['VolumeDataId'] = vol_id
-            cfg['ProjectionDataId'] = sino_id
-            alg_id = astra.algorithm.create(cfg)
-            try:
-                astra.algorithm.run(alg_id)
-                return astra.data2d.get(sino_id).copy()
-            finally:
-                astra.algorithm.delete(alg_id)
-        finally:
-            astra.data2d.delete([vol_id, sino_id])
-
-    def _bp_single(self, sino_np: np.ndarray) -> np.ndarray:
-        """
-        Backproject one sinogram.
-
-        Parameters
-        ----------
-        sino_np : np.ndarray, shape (n_angles, det_count), float32
-
-        Returns
-        -------
-        np.ndarray, shape (resolution, resolution), float32
-        """
-        astra = self._astra
-        vol_id = astra.data2d.create('-vol', self._vol_geom)
-        sino_id = astra.data2d.create('-sino', self._proj_geom, data=sino_np)
-        try:
-            if self._use_gpu:
-                cfg = astra.astra_dict('BP_CUDA')
-            else:
-                cfg = astra.astra_dict('BP')
-                cfg['ProjectorId'] = self._proj_id
-            cfg['ReconstructionDataId'] = vol_id
-            cfg['ProjectionDataId'] = sino_id
-            alg_id = astra.algorithm.create(cfg)
-            try:
-                astra.algorithm.run(alg_id)
-                return astra.data2d.get(vol_id).copy()
-            finally:
-                astra.algorithm.delete(alg_id)
-        finally:
-            astra.data2d.delete([vol_id, sino_id])
-
-    # ------------------------------------------------------------------
-    # Batched forward / backward (public interface)
-    # ------------------------------------------------------------------
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply Radon forward projection A x, scaled by dx.
-
-        Differentiable: gradients flow back through ASTRA via BP (the adjoint).
-
-        Parameters
-        ----------
-        x : torch.Tensor, shape (B, C, resolution, resolution)
-
-        Returns
-        -------
-        torch.Tensor, shape (B, C, n_angles, det_count)
-        """
-        return _AstraFP.apply(x, self) * self.dx
-
-    def backward(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        Apply adjoint / backprojection A^T y, scaled by 1/dx.
-
-        Differentiable: gradients flow back through ASTRA via FP (the adjoint of BP).
-
-        Parameters
-        ----------
-        y : torch.Tensor, shape (B, C, n_angles, det_count)
-
-        Returns
-        -------
-        torch.Tensor, shape (B, C, resolution, resolution)
-        """
-        return _AstraBP.apply(y / self.dx, self)
-
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-
-    def __del__(self) -> None:
-        """Release the ASTRA CPU projector if one was created."""
-        proj_id = getattr(self, '_proj_id', None)
-        if proj_id is not None:
-            try:
-                self._astra.projector.delete(proj_id)
-            except Exception:
-                pass
 
 # ---------------------------------------------------------------------------
 # Sparse-matrix backend
 #
 # Stores two system matrices -- A (all angles) and A_la (the measured angles
-# only) -- plus a truncated SVD of each, which is what makes the pseudoinverse
+# only) -- plus a truncated SVD of A_la, which is what makes the pseudoinverse
 # and the null-space projector exact rather than iterative.
 # ---------------------------------------------------------------------------
 
-class MatrixRadonAdapter(_RadonBase):
+class MatrixRadonAdapter:
     """
     Radon adapter backed by precomputed sparse system matrices A and A_la,
-    with truncated SVD factors stored for pseudoinverse and null-space operations.
+    with truncated SVD factors of A_la stored for pseudoinverse and null-space
+    operations.
 
     Operator algebra (image x in R^{n}, n = resolution^2; sinogram in R^{m}).
     A is the full-angle system matrix, A_la its restriction to the measured
@@ -628,13 +46,17 @@ class MatrixRadonAdapter(_RadonBase):
       forward        y      = A x            (·dx)          -> forward()
       forward_la     y_la   = A_la x                        -> forward_la()
       A_la^+         = V_k Σ_k^{-1} U_k^T     (pseudoinverse) -> backward_la()
-      P_ran          keep measured rows                     -> proj_ran()
-      P_nsn          = I - P_ran (unmeasured rows)          -> proj_nsn()
+      P_ran          = U_k U_k^T, projector onto range(A_la) -> proj_ran()
       P_N            = I - A_la^+ A_la = I - V_k V_k^T       -> proj_null_image()
                      image-domain projector onto null(A_la);  A_la P_N = 0
       decompose      e_ran = A_la^+ A_la e,  e_nul = (I - A_la^+ A_la) e,
                      with ||e||^2 = ||e_ran||^2 + ||e_nul||^2  -> decompose_error()
       ||A||_2        largest singular value of A (power iteration) -> norm_A / norm_A2
+
+    Note that P_ran is *not* the 0/1 mask that keeps the measured rows: it is the
+    projector onto range(A_la), a subspace of the measured rows, because not
+    every sinogram supported on the measured angles is the measurement of some
+    image.
 
     Parameters
     ----------
@@ -648,7 +70,7 @@ class MatrixRadonAdapter(_RadonBase):
         Limited-angle window [lo, hi) in radians.  Required.
     svd_threshold : float
         Relative singular-value cutoff: retain singular values >= threshold * s_max.
-        Must be > 0 to build SVD factors and enable backward / null-space methods.
+        Must be > 0 to build SVD factors and enable backward_la / null-space methods.
     dataset : str or None
         Optional label (stored, not used internally).
     dx : float
@@ -716,12 +138,6 @@ class MatrixRadonAdapter(_RadonBase):
         self.angles_la: np.ndarray = self.angles[_la_mask]
         self._la_row_mask: np.ndarray = np.repeat(_la_mask, self.det_count)
 
-        # Masks used by _RadonBase helpers (proj_ran / proj_nsn)
-        self._ran_mask_np = self._build_ran_mask_np()
-        self._nsn_mask_np = self._build_null_mask_np()
-        self._ran_mask = torch.from_numpy(self._ran_mask_np).to(device=self.device, dtype=self.dtype)
-        self._nsn_mask = torch.from_numpy(self._nsn_mask_np).to(device=self.device, dtype=self.dtype)
-
         cache_path = Path(cache_dir) / self._cache_key() if cache_dir is not None else None
         print(f"Cache path: {cache_path}")
         if cache_path is not None and cache_path.exists():
@@ -757,7 +173,12 @@ class MatrixRadonAdapter(_RadonBase):
     # ------------------------------------------------------------------
 
     def _build_matrices(self, astra) -> None:
-        """Build sparse A, sparse A_la, and (if svd_threshold > 0) their SVD factors."""
+        """Build sparse A, sparse A_la, and (if svd_threshold > 0) the SVD of A_la.
+
+        A itself is never decomposed: nothing in the pipeline inverts the
+        full-angle operator, so its SVD would be the most expensive computation
+        in the run for no consumer.
+        """
         vol_geom = astra.create_vol_geom(self.resolution, self.resolution)
         proj_geom = astra.create_proj_geom('parallel', 1.0, self.det_count, self.angles)
 
@@ -777,15 +198,13 @@ class MatrixRadonAdapter(_RadonBase):
         self._A = self._csr_to_torch(csr)
         print(f"Built sparse A, shape {tuple(csr.shape)}")
 
-        # Limited-angle submatrix
+        # Limited-angle submatrix. ASTRA's matrix is angle-major (row index =
+        # angle * det_count + detector), which is what _la_row_mask assumes.
         csr_la = csr[self._la_row_mask, :]
         self._A_la = self._csr_to_torch(csr_la)
         print(f"Built sparse A_la, shape {tuple(csr_la.shape)}")
 
         if self.svd_threshold > 0:
-            print("Computing SVD of A ...")
-            self._U_k, self._s_k, self._Vt_k = self._truncated_svd(csr)
-
             print("Computing SVD of A_la ...")
             self._U_k_la, self._s_k_la, self._Vt_k_la = self._truncated_svd(csr_la)
 
@@ -798,13 +217,9 @@ class MatrixRadonAdapter(_RadonBase):
         Returns U_k (m,k), s_k (k,), Vt_k (k,n) as torch tensors on self.device,
         retaining singular values >= svd_threshold * s_max.
 
-        GPU strategy: densify as float32, run torch.linalg.svd under the MAGMA
-        backend (full thin SVD in one pass — avoids cuSOLVER gesvdj which overflows
-        its int32 workspace counter for large sketch matrices).  Falls back to CPU
-        LAPACK / ARPACK if MAGMA is unavailable or the matrix is too large for VRAM.
-
-        CPU strategy: dense scipy.linalg.svd for matrices that fit in RAM,
-        otherwise scipy.sparse.linalg.svds (ARPACK) directly on the sparse matrix.
+        GPU strategy: densify as float64 and run torch.linalg.svd (full thin SVD
+        in one pass).  Falls back to dense CPU LAPACK, which is also the path
+        every CPU-only run (the test suite) takes.
         """
         m, n = csr.shape
 
@@ -828,12 +243,12 @@ class MatrixRadonAdapter(_RadonBase):
                 if not torch.isfinite(t).all():
                     raise RuntimeError(
                         f"SVD factor {name} from [{source}] contains NaN/Inf. "
-                        "Try a larger svd_threshold or increase the dense-SVD memory limit."
+                        "Try a larger svd_threshold."
                     )
             return U_k, s_k, Vt_k
 
         # ------------------------------------------------------------------
-        # GPU path: full thin SVD via MAGMA (single pass, no cuSOLVER limits)
+        # GPU path: full thin SVD on the densified matrix
         # ------------------------------------------------------------------
 
         if self.device.type == "cuda":
@@ -844,71 +259,29 @@ class MatrixRadonAdapter(_RadonBase):
                 dense_f64 = torch.from_numpy(csr.toarray().astype(np.float64)).to(self.device)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    #torch.backends.cuda.preferred_linalg_library("magma")
                     U_t, s_t, Vh_t = torch.linalg.svd(dense_f64, full_matrices=False)
-                    #torch.backends.cuda.preferred_linalg_library("default")
                 result = _cut_and_return(
-                    U_t.cpu().numpy(), s_t.cpu().numpy(), Vh_t.cpu().numpy(), "GPU MAGMA"
+                    U_t.cpu().numpy(), s_t.cpu().numpy(), Vh_t.cpu().numpy(), "GPU"
                 )
                 del dense_f64, U_t, s_t, Vh_t
                 torch.cuda.empty_cache()
                 return result
             except Exception as exc:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
-                    torch.backends.cuda.preferred_linalg_library("default")
                 if dense_f64 is not None:
                     del dense_f64
                 torch.cuda.empty_cache()
-                print(f"  MAGMA SVD failed ({exc}); falling back to CPU ...")
+                print(f"  GPU SVD failed ({exc}); falling back to CPU ...")
 
         # ------------------------------------------------------------------
-        # CPU path: dense LAPACK for small matrices, ARPACK for large ones, LAPACK is prefered
+        # CPU path: dense LAPACK
         # ------------------------------------------------------------------
         mem_gb_f64 = m * n * 8 / 1e9
-        if mem_gb_f64 <= 8.0:
-            print(f"  densifying {m}×{n} on CPU ({mem_gb_f64:.1f} GB fp64) ...")
-            dense = csr.toarray().astype(np.float64)
-            U, s_cpu, Vt = scipy.linalg.svd(dense, full_matrices=False)
-            del dense
-            return _cut_and_return(U, s_cpu, Vt, "CPU LAPACK")
+        print(f"  densifying {m}×{n} on CPU ({mem_gb_f64:.1f} GB fp64) ...")
+        dense = csr.toarray().astype(np.float64)
+        U, s_cpu, Vt = scipy.linalg.svd(dense, full_matrices=False)
+        del dense
+        return _cut_and_return(U, s_cpu, Vt, "CPU LAPACK")
 
-        from scipy.sparse.linalg import svds as sp_svds
-
-        sparse_max_q = min(m, n) - 1
-        sparse_q = min(256, sparse_max_q)
-        while True:
-            k = min(sparse_q, sparse_max_q)
-
-            if k > sparse_max_q // 2:
-                warnings.warn(
-                    f"ARPACK SVD requested k={k} which is >{sparse_max_q//2} "
-                    f"(>half of sparse_max_q={sparse_max_q}). Results may be "
-                    "numerically unstable. Consider increasing svd_threshold or "
-                    "raising the dense-SVD memory limit.",
-                    UserWarning, stacklevel=3,
-                )
-
-            print(f"  sparse CPU SVD (ARPACK), k={k} ...")
-            # Try PROPACK first (faster for large k), fall back to ARPACK.
-            try:
-                U_cpu, s_arr, Vt_cpu = sp_svds(csr, k=k, which="LM", solver="propack")
-            except Exception:
-                U_cpu, s_arr, Vt_cpu = sp_svds(csr, k=k, which="LM")
-
-            # svds returns singular values in ascending order — reverse them.
-            idx = np.argsort(s_arr)[::-1]
-            s_arr = s_arr[idx]
-            U_cpu = U_cpu[:, idx]
-            Vt_cpu = Vt_cpu[idx, :]
-
-            if s_arr[-1] < self.svd_threshold * s_arr[0] or k >= sparse_max_q:
-                break
-            next_q = min(k * 2, sparse_max_q)
-            print(f"  all {k} values above threshold, retrying with k={next_q} ...")
-            sparse_q = next_q
-
-        return _cut_and_return(U_cpu, s_arr, Vt_cpu, "sparse CPU")
     # ------------------------------------------------------------------
     # Cache key / save / load
     # ------------------------------------------------------------------
@@ -944,9 +317,6 @@ class MatrixRadonAdapter(_RadonBase):
             scipy.sparse.save_npz(str(path / f"{name}.npz"), csr)
 
         for name, tensor in [
-            ("U_k",    getattr(self, "_U_k",    None)),
-            ("s_k",    getattr(self, "_s_k",    None)),
-            ("Vt_k",   getattr(self, "_Vt_k",   None)),
             ("U_k_la", getattr(self, "_U_k_la", None)),
             ("s_k_la", getattr(self, "_s_k_la", None)),
             ("Vt_k_la",getattr(self, "_Vt_k_la",None)),
@@ -959,7 +329,7 @@ class MatrixRadonAdapter(_RadonBase):
         self._A    = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A.npz")).astype(np.float64))
         self._A_la = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A_la.npz")).astype(np.float64))
 
-        for name in ("U_k", "s_k", "Vt_k", "U_k_la", "s_k_la", "Vt_k_la"):
+        for name in ("U_k_la", "s_k_la", "Vt_k_la"):
             p = path / f"{name}.npy"
             if p.exists():
                 setattr(self, f"_{name}",
@@ -1008,7 +378,7 @@ class MatrixRadonAdapter(_RadonBase):
         Limited-angle forward projection: y_la = A_la x.
 
         Returns a full-shape sinogram (same shape as forward()) with non-LA
-        rows zeroed out, so that both adapters share the same sinogram convention.
+        rows zeroed out.
 
         Parameters
         ----------
@@ -1027,7 +397,7 @@ class MatrixRadonAdapter(_RadonBase):
             .to(device=x.device, dtype=x.dtype) * self.dx)
 
     # ------------------------------------------------------------------
-    # Sinogram-space projections  —  SVD-based
+    # Sinogram-space projection  —  SVD-based
     # ------------------------------------------------------------------
 
     def _la_mask(self) -> np.ndarray:
@@ -1053,6 +423,9 @@ class MatrixRadonAdapter(_RadonBase):
             y_r = U_kl (U_kl^T y_la)
         where y_la are the LA rows of y.  Result is full-shape with non-LA rows
         set to zero.
+
+        This is strictly smaller than "keep the measured rows": range(A_la) is a
+        k-dimensional subspace of the n_la*det_count measured coordinates.
         """
         self._require_svd("_U_k_la", "proj_ran")
         la_mask = self._la_mask()
@@ -1066,103 +439,9 @@ class MatrixRadonAdapter(_RadonBase):
                     ).reshape(B * C, n_la, nd)
         return self._compact_to_full(y_proj, B, C).to(device=orig_device, dtype=orig_dtype)
 
-    def proj_nsn(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        Project sinogram onto the null-sinogram space (complement of range(A_la)):
-            y_n = y - proj_ran(y)
-        """
-        return y - self.proj_ran(y)
-
     # ------------------------------------------------------------------
-    # FBP — filter + sparse adjoint A^T, matching AstraRadonAdapter behaviour
+    # Pseudoinverse (backward) operator  —  A_la^+
     # ------------------------------------------------------------------
-
-    def _backproject(self, y: torch.Tensor) -> torch.Tensor:
-        """Apply sparse adjoint A^T to a full-shape sinogram (not the pseudoinverse)."""
-        orig_device, orig_dtype = y.device, y.dtype
-        B, C, n_a, nd = y.shape
-        y_flat = (y / self.dx).reshape(B * C, n_a * nd).to(dtype=self.dtype, device=self.device)
-        x_flat = self._matmul(self._A.t(), y_flat.t()).t()
-        return x_flat.reshape(B, C, self.resolution, self.resolution).to(device=orig_device, dtype=orig_dtype)
-
-    def _backproject_la(self, y: torch.Tensor) -> torch.Tensor:
-        """Apply sparse adjoint A_la^T to a full-shape sinogram (extracts LA rows first)."""
-        orig_device, orig_dtype = y.device, y.dtype
-        la_mask = self._la_mask()
-        y_compact = y[..., la_mask, :]                        # (B,C,n_la,det_count)
-        B, C, n_la, nd = y_compact.shape
-        y_flat = (y_compact / self.dx).reshape(B * C, n_la * nd).to(dtype=self.dtype, device=self.device)
-        x_flat = self._matmul(self._A_la.t(), y_flat.t()).t()
-        return x_flat.reshape(B, C, self.resolution, self.resolution).to(device=orig_device, dtype=orig_dtype)
-
-    def fbp(self, y: torch.Tensor, filter_name: str = "ram-lak") -> torch.Tensor:
-        """
-        Full-angle filtered backprojection: x = A^T( filter(y) ).
-
-        Matches AstraRadonAdapter behaviour so that fbp(forward(v)) ≈ v and
-        the NSN null-space approximation works correctly.
-        Use backward() for the exact pseudoinverse A^+ instead.
-
-        Parameters
-        ----------
-        y : (B, C, n_angles, det_count)
-
-        Returns
-        -------
-        x : (B, C, res, res)
-        """
-        return self._backproject(filter_sinogram(y, filter_name=filter_name))
-
-    def fbp_la(self, y: torch.Tensor, filter_name: str = "ram-lak") -> torch.Tensor:
-        """
-        Limited-angle filtered backprojection: x = A_la^T( filter(proj_ran(y)) ).
-
-        Matches AstraRadonAdapter behaviour so that the NSN null-space approximation
-        is consistent across adapters.
-        Use backward_la() for the exact limited-angle pseudoinverse A_la^+ instead.
-
-        Parameters
-        ----------
-        y : (B, C, n_angles, det_count)  — non-LA rows are ignored
-
-        Returns
-        -------
-        x : (B, C, res, res)
-        """
-        return self._backproject_la(filter_sinogram(self.proj_ran(y), filter_name=filter_name))
-
-    # ------------------------------------------------------------------
-    # Pseudoinverse (backward) operators  —  A^+ and A_la^+
-    # ------------------------------------------------------------------
-
-    def backward(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        Apply the full-angle pseudoinverse: x = A^+ y.
-
-        Uses the truncated SVD: A^+ = Vt_k.T diag(1/s_k) U_k.T
-
-        Parameters
-        ----------
-        y : (B, C, n_angles, det_count)
-
-        Returns
-        -------
-        x : (B, C, res, res)
-        """
-        self._require_svd("_U_k", "backward (full pseudoinverse)")
-        orig_device, orig_dtype = y.device, y.dtype
-        B, C, n_a, nd = y.shape
-        y_flat = (y / self.dx).reshape(B * C, n_a * nd).to(dtype=self.dtype, device=self.device)
-        x_flat = self._apply_pseudoinverse(y_flat, self._U_k, self._s_k, self._Vt_k)
-        result = x_flat.reshape(B, C, self.resolution, self.resolution).to(device=orig_device, dtype=orig_dtype)
-        if not torch.isfinite(result).all():
-            warnings.warn(
-                "backward() produced non-finite values. The SVD factors may be corrupted "
-                "(common when ARPACK is used with k close to matrix rank). "
-                "Try a larger svd_threshold.",
-                RuntimeWarning, stacklevel=2,
-            )
-        return result
 
     def backward_la(self, y: torch.Tensor) -> torch.Tensor:
         """
@@ -1183,7 +462,7 @@ class MatrixRadonAdapter(_RadonBase):
         x : (B, C, res, res)
         """
         self._require_svd("_U_k_la", "backward_la (limited-angle pseudoinverse)")
-        la_mask = (self.angles >= self.phi[0]) & (self.angles < self.phi[1])
+        la_mask = self._la_mask()
         y_compact = y[..., la_mask, :]                       # (B,C,n_la,det_count)
         orig_device, orig_dtype = y_compact.device, y_compact.dtype
         B, C, n_la, nd = y_compact.shape
@@ -1223,10 +502,10 @@ class MatrixRadonAdapter(_RadonBase):
         return z @ Vt_k             # (batch, n)
 
     # ------------------------------------------------------------------
-    # Null-space projections
+    # Null-space projection
     # ------------------------------------------------------------------
 
-    def proj_null_la(self, v: torch.Tensor) -> torch.Tensor:
+    def proj_null_image(self, v: torch.Tensor) -> torch.Tensor:
         """
         Project image v onto null(A_la): v_n = v - V_kl V_kl^T v.
 
@@ -1240,50 +519,17 @@ class MatrixRadonAdapter(_RadonBase):
         -------
         v_n : (B, C, res, res)  — component of v in null(A_la)
         """
-        self._require_svd("_Vt_k_la", "proj_null_la")
-        return self._proj_null(v, self._Vt_k_la)
-
-    def proj_null_image(self, v: torch.Tensor) -> torch.Tensor:
-        """Alias for proj_null_la (overrides _RadonBase CG fallback)."""
-        return self.proj_null_la(v)
-
-    def proj_null(self, v: torch.Tensor) -> torch.Tensor:
-        """
-        Project image v onto null(A): v_n = v - V_k V_k^T v.
-
-        Parameters
-        ----------
-        v : (B, C, res, res)
-
-        Returns
-        -------
-        v_n : (B, C, res, res)  — component of v in null(A)
-        """
-        self._require_svd("_Vt_k", "proj_null")
-        return self._proj_null(v, self._Vt_k)
-
-    def _proj_null(self, v: torch.Tensor, Vt_k: torch.Tensor) -> torch.Tensor:
-        """
-        Shared null-space projection: v - Vt_k.T @ (Vt_k @ v_flat.T).
-
-        Parameters
-        ----------
-        v    : (B, C, res, res)
-        Vt_k : (k, n)
-
-        Returns
-        -------
-        (B, C, res, res)
-        """
+        self._require_svd("_Vt_k_la", "proj_null_image")
         orig_device, orig_dtype = v.device, v.dtype
         B, C, H, W = v.shape
+        Vt_k = self._Vt_k_la
         v_flat = v.reshape(B * C, H * W).to(dtype=self.dtype, device=self.device)
         coeffs = v_flat @ Vt_k.t()                 # (B*C, k)
         v_range = coeffs @ Vt_k                    # (B*C, n)  — range component
         result = (v_flat - v_range).reshape(B, C, H, W)
         return result.to(device=orig_device, dtype=orig_dtype)
 
-    def decompose_error(self, e: torch.Tensor, iters: int = 50, tol: float = 1e-6):
+    def decompose_error(self, e: torch.Tensor):
         """
         Exact SVD-based error decomposition: e = e_ran + e_null where
           e_ran  = Vt_kl.T (Vt_kl e)   (range component)
@@ -1335,5 +581,5 @@ class MatrixRadonAdapter(_RadonBase):
         if not hasattr(self, attr):
             raise RuntimeError(
                 f"{method} requires SVD factors. "
-                "Pass svd_threshold > 0 at construction (and ensure phi is set for _la variants)."
+                "Pass svd_threshold > 0 at construction."
             )

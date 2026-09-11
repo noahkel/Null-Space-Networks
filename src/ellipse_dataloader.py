@@ -1,31 +1,28 @@
 from pathlib import Path
-from typing import Optional, Tuple, Literal
+from typing import Optional, Tuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 
-InitType = Literal["fbp", "pinv"]
 
 class EllipsesGTInitDataset(Dataset):
     """
     Loads (ground_truth, init_reconstruction, sinogram) triples from a data
-    directory produced by create_phantom_data.py. ``init`` is the name of the
-    init-reconstruction folder: 'pinv' (matrix backend) or 'fbp' (astra).
+    directory produced by create_phantom_data.py. The init reconstruction is
+    the truncated-SVD pseudoinverse, stored under ``pinv/``.
     """
 
     def __init__(
         self,
         root: Path,
-        init: InitType = "pinv",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
-        check_files: bool = True,
     ):
         self.root = Path(root)
-        self.gt_dir = self.root / f"gt"
-        self.init_dir = self.root / f"{init}"
-        self.sino_dir = self.root / f"sino"
-        
+        self.gt_dir = self.root / "gt"
+        self.init_dir = self.root / "pinv"
+        self.sino_dir = self.root / "sino"
+
         self.files = sorted(f.name for f in self.gt_dir.glob("*.npy"))
 
         self.device = device
@@ -34,7 +31,7 @@ class EllipsesGTInitDataset(Dataset):
     def __len__(self) -> int:
         return len(self.files)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         fname = self.files[idx]
 
         x_gt = np.load(self.gt_dir / fname)
@@ -53,13 +50,8 @@ class EllipsesGTInitDataset(Dataset):
 
         return x_gt, x_init, y_delta
 
-"""
-Use this to load Ellipse Data, calls EllipsesGTInitDataset from above
-"""
-
 
 def get_ellipse_dataloader(
-    init_recon: str,
     batch_size: int,
     data_root: Path = Path("ellipses_out"),
     split: str = "train",          # "train" or "test"
@@ -68,24 +60,13 @@ def get_ellipse_dataloader(
     shuffle: bool = True,
     num_workers: int = 4,
     device: Optional[torch.device] = None,
-    seed: int = 0,
 ) -> DataLoader:
-    init_recon = init_recon.lower()
-    if init_recon not in ("fbp", "pinv"):
-        raise ValueError("init_recon must be one of: 'fbp', 'pinv'")
+    """Train/test loader over a data directory. The split is by index and
+    therefore deterministic: the first n_train samples train, the next n_test
+    test."""
+    dataset = EllipsesGTInitDataset(root=Path(data_root), device=device)
 
-    # full dataset
-    dataset = EllipsesGTInitDataset(
-        root=Path(data_root),
-        init=init_recon,
-        device=device,
-    )
-
-    # deterministic split
-    # rng = np.random.default_rng(seed)
     indices = np.arange(len(dataset))
-    # rng.shuffle(indices)
-
     train_idx = indices[:n_train]
     test_idx = indices[n_train:n_train + n_test]
 

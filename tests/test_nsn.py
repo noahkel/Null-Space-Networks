@@ -12,7 +12,7 @@ Covers, in order:
    7. models                 RESNET / NSN forward semantics
    8. the UNet blocks        shape contracts and the odd-size skip padding
    9. pipeline setup         prepare_run, build_init_inputs, radon/model loading
-  10. radon operators        the AstraRadonAdapter / MatrixRadonAdapter identities
+  10. radon operator         the MatrixRadonAdapter identities
                              and the FBP filter construction
   11. numeric helpers        the image-quality metrics in src/utils.py
   12. source hygiene         invariants the architecture depends on
@@ -78,10 +78,9 @@ class FakeRadon:
         self._A = torch.tensor(A, dtype=dtype)
         self._A_la = torch.tensor(A_la, dtype=dtype)
         self._P = torch.tensor(P_null, dtype=dtype)
-        # Pseudoinverses back the fbp / fbp_la stubs below, so the wrapper models
-        # (which compose forward -> project -> back-project) see an operator pair
-        # that actually round-trips instead of two unrelated linear maps.
-        self._A_pinv = torch.tensor(np.linalg.pinv(A), dtype=dtype)
+        # The pseudoinverse backs the backward_la stub below, so the wrapper
+        # models see an operator pair that actually round-trips instead of two
+        # unrelated linear maps.
         self._A_la_pinv = torch.tensor(np.linalg.pinv(A_la), dtype=dtype)
         self.norm_A2 = 1.0
 
@@ -104,35 +103,15 @@ class FakeRadon:
         y = v.reshape(b, self.N).to(self.dtype) @ self._A.T
         return y.reshape(b, 1, self.M_FULL, 1).to(v.dtype)
 
-    def proj_nsn(self, y):
-        """Projector onto the *unmeasured* rows of a full sinogram: forward()
-        stacks the measured LA_ROWS first, so this zeroes them."""
-        out = y.clone()
-        out.reshape(y.shape[0], -1)[:, : self.LA_ROWS] = 0
-        return out
-
-    def fbp_la(self, y):
+    def backward_la(self, y):
         b = y.shape[0]
         x = y.reshape(b, self.LA_ROWS).to(self.dtype) @ self._A_la_pinv.T
         return x.reshape(b, 1, self.IMG, self.IMG).to(y.dtype)
 
-    def fbp(self, y):
-        b = y.shape[0]
-        x = y.reshape(b, self.M_FULL).to(self.dtype) @ self._A_pinv.T
-        return x.reshape(b, 1, self.IMG, self.IMG).to(y.dtype)
-
-    def decompose_error(self, e, iters=50, tol=1e-6):
+    def decompose_error(self, e):
         e_nul = self.proj_null_image(e)
         e_ran = e - e_nul
         return e_ran, e_nul
-
-
-class _FakeInit:
-    def __init__(self, radon):
-        self.radon = radon
-
-    def surrogate(self, y):
-        return torch.zeros(y.shape[0], 1, self.radon.IMG, self.radon.IMG, dtype=y.dtype)
 
 
 class FakeAdapter:
@@ -144,7 +123,6 @@ class FakeAdapter:
         rng = np.random.default_rng(seed)
         self.radon = radon
         self.W = torch.tensor(rng.standard_normal((radon.LA_ROWS, radon.N)), dtype=dtype)
-        self.init_reconstructor = _FakeInit(radon)
         self.projector = lambda y: y
         self.dtype = dtype
 
@@ -494,10 +472,10 @@ def test_make_other_sample_target_is_derangement():
 # =========================================================================== #
 # Real-operator / real-model integration tests.
 #
-# These need the actual MatrixRadonAdapter (built via astra) and, for the astra
-# path, AstraRadonAdapter. They are gated by importorskip so the fast fake-based
-# unit tests above still run without astra / scipy. Everything runs on CPU in
-# float64 at a tiny resolution so it stays fast.
+# These need the actual MatrixRadonAdapter, whose system matrices are built via
+# astra. They are gated by importorskip so the fast fake-based unit tests above
+# still run without astra / scipy. Everything runs on CPU in float64 at a tiny
+# resolution so it stays fast.
 #
 # Note on the truncated SVD: MatrixRadonAdapter keeps singular values above
 # svd_threshold, so A_la @ (P_null x) is NOT exactly zero — only its projection
@@ -531,21 +509,6 @@ def matrix_radon():
         )
     except Exception as exc:                       # pragma: no cover - env dependent
         pytest.skip(f"could not build MatrixRadonAdapter: {exc}")
-
-
-@pytest.fixture(scope="session")
-def astra_radon():
-    """Real astra-backed operator (FP/BP adjoint pair)."""
-    pytest.importorskip("astra")
-    from src.radon import AstraRadonAdapter
-    try:
-        return AstraRadonAdapter(
-            resolution=_RES, angles=_angles(), det_count=_DET,
-            dx=1.0, estimate_norm=False, device=torch.device("cpu"),
-            dtype=torch.float64, phi=_PHI,
-        )
-    except Exception as exc:                       # pragma: no cover - env dependent
-        pytest.skip(f"could not build AstraRadonAdapter: {exc}")
 
 
 def _img(*shape):
@@ -609,8 +572,7 @@ def _build_model(radon, name):
 
 
 def _pinv_adapter(radon, model):
-    init = attack.InitReconstructor(init_method="pinv", radon=radon)
-    return attack.ModelAttackAdapter(model=model, init_reconstructor=init,
+    return attack.ModelAttackAdapter(model=model, radon=radon,
                                      projector=lambda y: radon.proj_ran(y))
 
 
@@ -662,33 +624,6 @@ def test_pgd_end_to_end_real_model(matrix_radon, model_name):
     assert float(attack.l2_norm_batch(res.delta).max()) <= eps + 1e-6
     # the perturbation stays in the measured subspace (projector applied)
     assert torch.allclose(res.delta, r.proj_ran(res.delta), atol=1e-7)
-
-
-# --------------------------------------------------------------------------- #
-# AstraRadonAdapter: adjointness + limited-angle masking
-# --------------------------------------------------------------------------- #
-def test_astra_forward_backward_are_adjoint(astra_radon):
-    r = astra_radon
-    x = _img(2, 1, _RES, _RES)
-    y = _img(2, 1, _N_ANGLES, _DET)
-    lhs = float((r.forward(x) * y).sum())      # <A x, y>
-    rhs = float((x * r.backward(y)).sum())      # <x, A^T y>
-    scale = max(abs(lhs), abs(rhs), 1e-12)
-    assert abs(lhs - rhs) / scale < 2e-3, f"FP/BP not adjoint: {lhs} vs {rhs}"
-
-
-def test_astra_forward_la_masks_unmeasured_angles(astra_radon):
-    r = astra_radon
-    x = _img(2, 1, _RES, _RES)
-    y_la = r.forward_la(x)
-    # forward_la = forward * ran_mask, so the complement (null) angles are exactly 0
-    assert float(r.proj_nsn(y_la).abs().max()) == 0.0
-
-
-# =========================================================================== #
-# Feature-level tests (formerly test_todos.py).
-# =========================================================================== #
-
 
 
 # --------------------------------------------------------------------------- #
@@ -768,42 +703,6 @@ def test_aggregate_missing_keys_become_nan(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# TODO 1 — create_phantom_data.py --pinv_mode flag.
-# Imports odl/dival (heavy), so gated separately.
-# --------------------------------------------------------------------------- #
-def _parse_cpd(argv):
-    pytest.importorskip("odl")
-    pytest.importorskip("dival")
-    import src.create_phantom_data as cpd
-    old = sys.argv
-    sys.argv = ["create_phantom_data"] + argv
-    try:
-        return cpd.parse_args()
-    finally:
-        sys.argv = old
-
-
-def test_pinv_mode_default_thresholded():
-    assert _parse_cpd([]).pinv_mode == "thresholded"
-
-
-def test_pinv_mode_unthresholded():
-    assert _parse_cpd(["--pinv_mode", "unthresholded"]).pinv_mode == "unthresholded"
-
-
-def test_pinv_mode_invalid_rejected():
-    pytest.importorskip("odl")
-    pytest.importorskip("dival")
-    import src.create_phantom_data as cpd
-    old = sys.argv
-    sys.argv = ["create_phantom_data", "--pinv_mode", "bogus"]
-    try:
-        with pytest.raises(SystemExit):
-            cpd.parse_args()
-    finally:
-        sys.argv = old
-
-
 # --------------------------------------------------------------------------- #
 # TODOs 4–6 — data-consistency overview, null-structure analysis, attack
 # overview.  All read only saved artifacts; they need matplotlib + numpy but no
@@ -904,13 +803,13 @@ def test_build_models_all_four():
     assert set(models) == {"resnet", "nsn"}
 
 
-def test_detect_suite_models_finds_all_four(tmp_path):
+def test_detect_suite_models_finds_both(tmp_path):
     init = "fbp"
     ck = tmp_path / f"init_{init}" / "checkpoints"
     ck.mkdir(parents=True)
     for m in ("resnet", "nsn"):
         (ck / f"{m}_best.pt").write_bytes(b"x")
-    found = attack.detect_suite_models(str(tmp_path), init)
+    found = attack.detect_suite_models(str(tmp_path))
     assert set(found) == {"resnet", "nsn"}
 
 
@@ -956,7 +855,7 @@ def test_detect_epoch_checkpoints_orders_and_ignores_best(tmp_path):
     for e in (10, 1, 5, 2):
         (ck / f"nsn_epoch{e:03d}.pt").write_bytes(b"x")
     (ck / "nsn_best.pt").write_bytes(b"x")  # must NOT be treated as an epoch
-    got = attack.detect_epoch_checkpoints(str(tmp_path), "fbp", "nsn")
+    got = attack.detect_epoch_checkpoints(str(tmp_path), "nsn")
     assert [e for e, _ in got] == [1, 2, 5, 10]
 
 
@@ -966,14 +865,14 @@ def test_load_epoch_history(tmp_path):
     (ck / "nsn_history.json").write_text(json.dumps({
         "best_epoch": 5,
         "history": [{"epoch": e, "train": 1.0 / e, "val": 0.5 / e} for e in (1, 2, 5)]}))
-    hist, best = attack.load_epoch_history(str(tmp_path), "fbp", "nsn")
+    hist, best = attack.load_epoch_history(str(tmp_path), "nsn")
     assert best == 5
     assert set(hist) == {1, 2, 5}
     assert hist[2] == (0.5, 0.25)
 
 
 def test_load_epoch_history_missing(tmp_path):
-    hist, best = attack.load_epoch_history(str(tmp_path), "fbp", "nsn")
+    hist, best = attack.load_epoch_history(str(tmp_path), "nsn")
     assert hist == {} and best is None
 
 
@@ -1173,7 +1072,6 @@ class ModelRadon:
         self.dtype = dtype
         self._A = torch.tensor(A, dtype=dtype)
         self._P = torch.tensor(P_null, dtype=dtype)
-        self._A_pinv = torch.tensor(np.linalg.pinv(A), dtype=dtype)
         self._A_la_pinv = torch.tensor(np.linalg.pinv(A_la), dtype=dtype)
         self.norm_A2 = 1.0
 
@@ -1193,22 +1091,15 @@ class ModelRadon:
         flat_out[:, : self.LA_ROWS] = flat_in[:, : self.LA_ROWS]
         return flat_out.reshape(y.shape)
 
-    def proj_nsn(self, y):
-        return y - self.proj_ran(y)
-
     def proj_null_image(self, v):
         return (self._flat(v) @ self._P.T).reshape(v.shape).to(v.dtype)
 
-    def fbp(self, y):
-        x = self._flat(y) @ self._A_pinv.T
-        return x.reshape(y.shape[0], 1, self.IMG, self.IMG).to(y.dtype)
-
-    def fbp_la(self, y):
+    def backward_la(self, y):
         rows = y.reshape(y.shape[0], -1)[:, : self.LA_ROWS].to(self.dtype)
         return (rows @ self._A_la_pinv.T).reshape(
             y.shape[0], 1, self.IMG, self.IMG).to(y.dtype)
 
-    def decompose_error(self, e, iters=50, tol=1e-6):
+    def decompose_error(self, e):
         e_nul = self.proj_null_image(e)
         return e - e_nul, e_nul
 
@@ -1308,8 +1199,7 @@ def test_every_model_preserves_shape_and_is_differentiable(model_radon, name):
     model = build_models([name], radon=model_radon)[name].to(torch.float64)
     x = torch.randn(2, 1, model_radon.IMG, model_radon.IMG,
                     dtype=model_radon.dtype, requires_grad=True)
-    y = model_radon.forward_la(x).detach()
-    out = model(x, y)
+    out = model(x)
     assert out.shape == x.shape
     out.pow(2).mean().backward()
     assert x.grad is not None and torch.isfinite(x.grad).all()
@@ -1369,14 +1259,6 @@ def test_up_pads_an_odd_sized_skip():
     assert Up(12, 6)(x1, x2).shape == (1, 6, 9, 9)
 
 
-def test_up_without_bilinear_uses_a_learned_upsample():
-    from src.unet import Up
-    up = Up(16, 8, bilinear=False)
-    assert isinstance(up.up, torch.nn.ConvTranspose2d)
-    x1, x2 = torch.randn(1, 16, 4, 4), torch.randn(1, 8, 8, 8)
-    assert up(x1, x2).shape == (1, 8, 8, 8)
-
-
 def test_out_conv_is_pointwise():
     """A 1x1 convolution acts on each pixel independently, so permuting the
     pixels must permute the output — the property that makes the final layer a
@@ -1392,7 +1274,7 @@ def test_unet_preserves_shape_and_passes_gradient():
     """The contract every wrapper assumes: N(x) is the same shape as x, and the
     whole path is differentiable so PGD can attack through it."""
     from src.unet import UNet
-    net = UNet(in_channels=1, out_channels=1)
+    net = UNet()
     x = torch.randn(1, 1, 16, 16, requires_grad=True)
     out = net(x)
     assert out.shape == x.shape
@@ -1409,7 +1291,7 @@ def test_unet_preserves_shape_and_passes_gradient():
 # =========================================================================== #
 def _summary_dict(**over):
     d = {"dataset": "ellipses", "img_size": 8, "num_angles": 12, "det_count": 10,
-         "angles": [0.0] * 12, "dx": 1.0, "phi": [0.0, 2.0], "matrix_mode": 1,
+         "angles": [0.0] * 12, "dx": 1.0, "phi": [0.0, 2.0],
          "noise_sigma_rel": 0.02, "mean_norm_y": 7.0,
          "mean_norm_y_minus_y_delta": 0.5}
     d.update(over)
@@ -1441,26 +1323,11 @@ def test_load_summary_reads_the_data_root(tmp_path):
     assert attack.load_summary(str(root))["num_angles"] == 12
 
 
-def test_detect_data_inits_finds_only_populated_folders(tmp_path):
-    root = _data_root(tmp_path, inits=("pinv",))
-    (root / "fbp").mkdir()                     # exists but holds no .npy
-    got = attack.detect_data_inits(str(root))
-    assert got == ["pinv"], "an empty init folder must not be treated as data"
-
-
-def test_detect_data_inits_is_ordered_deterministically(tmp_path):
-    """Init order decides the order of every downstream artifact, so it must not
-    depend on filesystem enumeration."""
-    root = _data_root(tmp_path, inits=("pinv", "fbp"))
-    assert attack.detect_data_inits(str(root)) == attack.detect_data_inits(str(root))
-
-
 def test_prepare_run_resolves_the_shared_context(tmp_path, monkeypatch):
     root = _data_root(tmp_path)
     monkeypatch.setattr(attack, "build_radon", lambda *a, **k: object())
     s = attack.prepare_run(_prep_args(root))
     assert s.noise_rel == 0.02 and s.mean_sino_norm == 7.0
-    assert set(s.inits) == {"pinv", "fbp"}
 
 
 def test_prepare_run_out_root_defaults_to_the_noise_level(tmp_path, monkeypatch):
@@ -1469,12 +1336,6 @@ def test_prepare_run_out_root_defaults_to_the_noise_level(tmp_path, monkeypatch)
     assert attack.prepare_run(_prep_args(root)).out_root.name == "attacks_n0.02"
     explicit = attack.prepare_run(_prep_args(root, out_dir="somewhere"))
     assert explicit.out_root.name == "somewhere"
-
-
-def test_prepare_run_honours_an_explicit_init(tmp_path, monkeypatch):
-    root = _data_root(tmp_path)
-    monkeypatch.setattr(attack, "build_radon", lambda *a, **k: object())
-    assert attack.prepare_run(_prep_args(root, init="PINV")).inits == ["pinv"]
 
 
 def test_prepare_run_rejects_a_data_root_without_inits(tmp_path, monkeypatch):
@@ -1526,31 +1387,11 @@ def test_build_input_cache_applies_the_range_projector():
 # =========================================================================== #
 # Operator construction — which backend a run uses is decided by summary.json.
 # =========================================================================== #
-def test_build_radon_dispatches_on_matrix_mode(monkeypatch):
-    """matrix_mode picks the whole numerical backend. Getting it wrong does not
-    crash; it silently reconstructs with a different operator."""
-    seen = {}
-
-    class _Marker:
-        def __init__(self, **kw):
-            seen.update(kw)
-            seen["cls"] = self.__class__.__name__
-
-    monkeypatch.setattr(attack, "MatrixRadonAdapter", type("M", (_Marker,), {}))
-    monkeypatch.setattr(attack, "AstraRadonAdapter", type("A", (_Marker,), {}))
-
-    attack.build_radon(_summary_dict(matrix_mode=1), device=torch.device("cpu"))
-    assert seen["cls"] == "M"
-    seen.clear()
-    attack.build_radon(_summary_dict(matrix_mode=0), device=torch.device("cpu"))
-    assert seen["cls"] == "A"
-
-
 def test_build_radon_passes_the_geometry_through(monkeypatch):
     seen = {}
     monkeypatch.setattr(attack, "MatrixRadonAdapter",
                         lambda **kw: seen.update(kw) or object())
-    attack.build_radon(_summary_dict(matrix_mode=1, img_size=8, det_count=10),
+    attack.build_radon(_summary_dict(img_size=8, det_count=10),
                        device=torch.device("cpu"))
     assert seen["resolution"] == 8 and seen["det_count"] == 10
     assert len(seen["angles"]) == 12
@@ -1573,7 +1414,7 @@ def test_dataset_returns_aligned_triples(tmp_path):
     """gt / init / sinogram must be the *same* sample: a sort mismatch would
     silently pair every image with someone else's measurements."""
     from src.ellipse_dataloader import EllipsesGTInitDataset
-    ds = EllipsesGTInitDataset(_npy_dataset(tmp_path), init="pinv")
+    ds = EllipsesGTInitDataset(_npy_dataset(tmp_path))
     assert len(ds) == 6
     for i in (0, 3, 5):
         x_gt, x_init, y = ds[i]
@@ -1583,20 +1424,11 @@ def test_dataset_returns_aligned_triples(tmp_path):
         assert y.flatten()[0].item() == pytest.approx(float(i))
 
 
-def test_dataset_selects_the_requested_init(tmp_path):
-    from src.ellipse_dataloader import EllipsesGTInitDataset
-    root = _npy_dataset(tmp_path)
-    (root / "fbp").mkdir()
-    for i in range(6):
-        np.save(root / "fbp" / f"{i:05d}.npy", np.full((5, 5), 99.0, dtype=np.float32))
-    assert EllipsesGTInitDataset(root, init="fbp")[0][1].flatten()[0].item() == 99.0
-
-
 def test_dataloader_splits_train_and_test_disjointly(tmp_path):
     """Attacking on samples the model trained on would flatter every result."""
     from src.ellipse_dataloader import get_ellipse_dataloader
     root = _npy_dataset(tmp_path, n=6)
-    common = dict(init_recon="pinv", batch_size=1, n_train=4, n_test=2,
+    common = dict(batch_size=1, n_train=4, n_test=2,
                   shuffle=False, num_workers=0, data_root=str(root))
     ids = {}
     for split in ("train", "test"):
@@ -1610,7 +1442,7 @@ def test_dataloader_is_deterministic_without_shuffle(tmp_path):
     """The suite relies on every model seeing byte-identical inputs."""
     from src.ellipse_dataloader import get_ellipse_dataloader
     root = _npy_dataset(tmp_path, n=6)
-    kw = dict(init_recon="pinv", batch_size=2, split="test", n_train=4, n_test=2,
+    kw = dict(batch_size=2, split="test", n_train=4, n_test=2,
               shuffle=False, num_workers=0, data_root=str(root))
     a = [float(b[0].flatten()[0]) for b in get_ellipse_dataloader(**kw)]
     b = [float(x.flatten()[0]) for x in
@@ -1627,9 +1459,9 @@ def test_lipschitz_plot_renders(tmp_path):
 
 
 # =========================================================================== #
-# Radon operators — AstraRadonAdapter / MatrixRadonAdapter identities and the
-# FBP filter construction. Tiny synthetic limited-angle operators, built on the
-# spot: no data directory, summary.json or checkpoint involved.
+# Radon operator — MatrixRadonAdapter identities. A tiny synthetic
+# limited-angle operator, built on the spot: no data directory, summary.json or
+# checkpoint involved.
 # =========================================================================== #
 def rel(a, b):
     """Relative error ||a - b|| / ||b||."""
@@ -1650,12 +1482,11 @@ def make_phantom(res, device, dtype):
 # ---------------------------------------------------------------------------
 # Pytest fixtures — tiny synthetic limited-angle operators
 #
-# The math tests below verify the AstraRadonAdapter / MatrixRadonAdapter
-# operator identities directly, with no --data-dir, summary.json or trained
-# checkpoint. Building the operators needs astra (forward/back-projection) and,
-# for the truncated SVD, scipy; both are gated with importorskip so the module
-# skips cleanly wherever they are absent. Everything runs on CPU in float64 at a
-# tiny resolution to stay fast.
+# The math tests below verify the MatrixRadonAdapter operator identities
+# directly, with no --data-dir, summary.json or trained checkpoint. Building the
+# operator needs astra (the system matrix) and, for the truncated SVD, scipy;
+# both are gated with importorskip so the module skips cleanly wherever they are
+# absent. Everything runs on CPU in float64 at a tiny resolution to stay fast.
 # ---------------------------------------------------------------------------
 _RES = 16
 _DET = 24                                  # >= ceil(sqrt(2)*16), avoids clip warning
@@ -1671,21 +1502,6 @@ def _fixture_angles():
 @pytest.fixture(scope="module")
 def svd_thresh():
     return _SVD_THRESH
-
-
-@pytest.fixture(scope="module")
-def astra_r():
-    """Astra-backed forward/back-projection operator."""
-    pytest.importorskip("astra")
-    from src.radon import AstraRadonAdapter
-    try:
-        return AstraRadonAdapter(
-            resolution=_RES, angles=_fixture_angles(), det_count=_DET, phi=_PHI,
-            dx=1.0, estimate_norm=True, device=torch.device("cpu"),
-            dtype=torch.float64,
-        )
-    except Exception as exc:                       # pragma: no cover - env dependent
-        pytest.skip(f"could not build AstraRadonAdapter: {exc}")
 
 
 @pytest.fixture(scope="module")
@@ -1733,29 +1549,19 @@ def v():
 # Tests — Radon operator identities
 # ---------------------------------------------------------------------------
 
-def test_shapes(astra_r, matrix_r, x):
-    """forward / forward_la / backward all return the expected shapes."""
+def test_shapes(matrix_r, x):
+    """forward / forward_la / backward_la all return the expected shapes."""
     B, C, H, W = x.shape
-    n_a = len(astra_r.angles)
-    nd = astra_r.det_count
+    n_a = len(matrix_r.angles)
+    nd = matrix_r.det_count
 
-    y_a = astra_r.forward(x)
     y_m = matrix_r.forward(x)
     y_la = matrix_r.forward_la(x)
 
-    assert tuple(y_a.shape) == (B, C, n_a, nd)
     assert tuple(y_m.shape) == (B, C, n_a, nd)
     assert tuple(y_la.shape) == (B, C, n_a, nd)
 
-    assert tuple(matrix_r.backward(y_m).shape) == (B, C, H, W)
     assert tuple(matrix_r.backward_la(y_la).shape) == (B, C, H, W)
-
-
-def test_forward_consistency(astra_r, matrix_r, x):
-    """MatrixRadon forward matches the astra forward projection."""
-    y_astra = astra_r.forward(x).to(dtype=torch.float64)
-    y_matrix = matrix_r.forward(x)
-    assert rel(y_matrix, y_astra) < 1e-3
 
 
 def test_forward_la_rows(matrix_r, x):
@@ -1767,17 +1573,11 @@ def test_forward_la_rows(matrix_r, x):
 
 
 def test_svd_reconstruction(matrix_r, x):
-    """Truncated SVD factors reproduce the sparse system matrices (full + la)."""
-    assert hasattr(matrix_r, "_U_k"), "SVD not built (svd_threshold == 0)"
+    """Truncated SVD factors reproduce the sparse limited-angle system matrix."""
+    assert hasattr(matrix_r, "_U_k_la"), "SVD not built (svd_threshold == 0)"
     _, _, H, W = x.shape
     x_flat = x.reshape(1, H * W).to(dtype=matrix_r.dtype, device=matrix_r.device)
 
-    # Full A
-    y_sparse = torch.sparse.mm(matrix_r._A, x_flat.t()).t()
-    y_svd = (matrix_r._U_k * matrix_r._s_k) @ (matrix_r._Vt_k @ x_flat.t())
-    assert rel(y_svd.t(), y_sparse) < 1e-2
-
-    # Limited-angle A_la
     y_la_sparse = torch.sparse.mm(matrix_r._A_la, x_flat.t()).t()
     y_la_svd = (matrix_r._U_k_la * matrix_r._s_k_la) @ (matrix_r._Vt_k_la @ x_flat.t())
     assert rel(y_la_svd.t(), y_la_sparse) < 1e-2
@@ -1794,9 +1594,8 @@ def test_dense_layout_matches_sparse(matrix_r, matrix_r_dense, x):
     assert matrix_r_dense._A.layout == torch.strided
 
     y = matrix_r.forward(x)
-    for name, arg in [("forward", x), ("forward_la", x), ("fbp", y),
-                      ("fbp_la", y), ("backward", y), ("backward_la", y),
-                      ("proj_ran", y), ("proj_null", x)]:
+    for name, arg in [("forward", x), ("forward_la", x), ("backward_la", y),
+                      ("proj_ran", y), ("proj_null_image", x)]:
         out_ref = getattr(matrix_r, name)(arg)
         out_dense = getattr(matrix_r_dense, name)(arg.to(torch.float32))
         scale = out_ref.double().norm().clamp_min(arg.double().norm())
@@ -1814,17 +1613,10 @@ def test_dense_layout_matches_sparse(matrix_r, matrix_r_dense, x):
 
 
 def test_pseudoinverse_range_consistency(matrix_r, x, svd_thresh):
-    """A A^+ A x == A x on the retained range, and backward stays finite."""
-    assert hasattr(matrix_r, "_U_k"), "SVD not built"
+    """A_la A_la^+ A_la x == A_la x on the retained range, and stays finite."""
+    assert hasattr(matrix_r, "_U_k_la"), "SVD not built"
     tol = max(1e-6, svd_thresh)
 
-    # Full
-    y = matrix_r.forward(x)
-    x_back = matrix_r.backward(y)
-    assert torch.isfinite(x_back).all(), "backward() produced NaN/Inf"
-    assert rel(matrix_r.forward(x_back), y) < tol
-
-    # Limited-angle
     y_la = matrix_r.forward_la(x)
     x_back_la = matrix_r.backward_la(y_la)
     assert torch.isfinite(x_back_la).all(), "backward_la() produced NaN/Inf"
@@ -1834,214 +1626,34 @@ def test_pseudoinverse_range_consistency(matrix_r, x, svd_thresh):
 def test_null_space(matrix_r, v):
     """Null-space projections carry no *measured* (retained-range) signal.
 
-    Under a truncated SVD the raw ``A_la @ proj_null_la(v)`` is not exactly zero
-    — a sub-threshold trace survives — so the exact, threshold-independent
+    Under a truncated SVD the raw ``A_la @ proj_null_image(v)`` is not exactly
+    zero — a sub-threshold trace survives — so the exact, threshold-independent
     invariant the reconstruction pipeline relies on is that the projection onto
-    the *retained range* (i.e. the measured data) vanishes. This mirrors the
-    proj_ran-based checks in test_attack.py.
+    the *retained range* (i.e. the measured data) vanishes.
     """
-    assert hasattr(matrix_r, "_U_k"), "SVD not built"
+    assert hasattr(matrix_r, "_U_k_la"), "SVD not built"
 
     # null(A_la): invisible to the measured limited-angle data proj_ran(A_la ·).
-    v_null_la = matrix_r.proj_null_la(v)
+    v_null_la = matrix_r.proj_null_image(v)
     meas_null = matrix_r.proj_ran(matrix_r.forward_la(v_null_la)).norm()
     meas_ref = matrix_r.proj_ran(matrix_r.forward_la(v)).norm().clamp_min(1e-12)
     assert float(meas_null / meas_ref) < 1e-8
 
-    # null(A): invisible to the full operator's retained range (project A v onto U_k).
-    def measured_full(image):
-        y = torch.sparse.mm(matrix_r._A, image.reshape(1, -1).to(matrix_r.dtype).t()).t()
-        return ((y @ matrix_r._U_k) @ matrix_r._U_k.t()).norm()
-
-    v_null = matrix_r.proj_null(v)
-    assert float(measured_full(v_null) / measured_full(v).clamp_min(1e-12)) < 1e-8
-
 
 def test_decomposition(matrix_r, v):
-    """A_la^+ A_la v + proj_null_la(v) == v (orthogonal range/null split)."""
+    """A_la^+ A_la v + proj_null_image(v) == v (orthogonal range/null split)."""
     assert hasattr(matrix_r, "_U_k_la"), "SVD not built"
     range_comp = matrix_r.backward_la(matrix_r.forward_la(v))
-    null_comp = matrix_r.proj_null_la(v)
+    null_comp = matrix_r.proj_null_image(v)
     assert rel(range_comp + null_comp, v) < 1e-6
 
 
-def test_operator_norm(astra_r, matrix_r):
-    """Both adapters yield a positive, finite, mutually-consistent ‖A‖."""
-    assert astra_r.norm_A is not None and astra_r.norm_A > 0
+def test_operator_norm(matrix_r):
+    """Power iteration yields a positive, finite ‖A‖."""
     assert matrix_r.norm_A is not None and matrix_r.norm_A > 0
-    ratio = matrix_r.norm_A / astra_r.norm_A
-    assert 0.8 < ratio < 1.2, f"norm_A ratio {ratio:.3f} out of range"
+    assert math.isfinite(matrix_r.norm_A)
+    assert matrix_r.norm_A2 == pytest.approx(matrix_r.norm_A ** 2, rel=1e-9)
 
-
-# ---------------------------------------------------------------------------
-# FBP filtering helpers.
-#
-# construct_fourier_filter_torch / filter_sinogram are pure torch — no astra, no
-# operator — so unlike everything above they run everywhere. They are asserted
-# through their defining properties rather than against stored numbers: the ramp
-# is the |omega| response built from the Ram-Lak impulse response, every named
-# window attenuates it, and the sinogram filter is linear and per-row.
-# ---------------------------------------------------------------------------
-from src.radon import construct_fourier_filter_torch, filter_sinogram   # noqa: E402
-
-_FILTERS = ["ramp", "ram-lak", "shepp-logan", "cosine", "hamming", "hann"]
-
-
-def _filt(size=64, name="ramp", dtype=torch.float64):
-    return construct_fourier_filter_torch(size, name, device=torch.device("cpu"), dtype=dtype)
-
-
-@pytest.mark.parametrize("name", _FILTERS)
-def test_fourier_filter_is_real_and_nonnegative(name):
-    """A frequency response that only attenuates: real-valued and |omega|-like,
-    so never negative — a negative band would invert that part of the spectrum."""
-    f = _filt(name=name)
-    assert f.shape == (64,) and not f.is_complex()
-    assert torch.isfinite(f).all()
-    assert (f >= -1e-12).all(), "a negative frequency response inverts that band"
-
-
-@pytest.mark.parametrize("name", ["ramp", "ram-lak", "shepp-logan", "hamming", "hann"])
-def test_fourier_filter_is_symmetric_about_nyquist(name):
-    """f[k] == f[size-k]: the filter is zero-phase, so it may blur but must not
-    shift. An asymmetric response would displace the backprojection sideways."""
-    f = _filt(name=name)
-    assert torch.allclose(f[1:32], f.flip(0)[:31], atol=1e-12)
-
-
-def test_cosine_filter_is_asymmetric_known_defect():
-    """`cosine` is the one option that fails the test above. It windows with
-    fftshift(sin(linspace(0, pi, size))), a half-sine whose centre lands half a
-    bin off the FFT's Nyquist, so the response is neither symmetric nor peaked
-    at Nyquist (it peaks at bin 46 of 64). Nothing in the pipeline uses it —
-    everything asks for 'ram-lak' — so this pins the behaviour rather than
-    hiding it; fix the window before using this filter for anything.
-    """
-    f = _filt(name="cosine")
-    assert float((f[1:32] - f.flip(0)[:31]).abs().max()) > 1e-3
-    assert int(f.argmax()) != 32
-
-
-@pytest.mark.parametrize("name", _FILTERS)
-def test_every_filter_suppresses_dc(name):
-    """The ramp is |omega|, so DC is suppressed — which is why FBP cannot recover
-    the image mean from the filtered data. The discrete Ram-Lak kernel leaves a
-    small residue rather than an exact zero; what matters is that it is
-    negligible against the ramp's own peak, which is the scale every window
-    starts from."""
-    f = _filt(name=name)
-    assert float(f[0]) < 0.01 * float(_filt(name="ramp").max())
-
-
-def test_ramp_filter_rises_monotonically_to_nyquist():
-    """The defining shape of |omega|: no dips, peak at the Nyquist bin."""
-    f = _filt(name="ramp")
-    assert int(f.argmax()) == 32                     # size // 2 = Nyquist
-    assert (f[1:33].diff() > 0).all()
-
-
-def test_ram_lak_is_an_alias_for_ramp():
-    assert torch.equal(_filt(name="ramp"), _filt(name="ram-lak"))
-
-
-@pytest.mark.parametrize("name", ["shepp-logan", "cosine", "hamming", "hann"])
-def test_windowed_filters_attenuate_the_ramp(name):
-    """Every non-ramp option is the ramp times a window in [0, 1]: it may only
-    take energy out, and must take a visible amount out at Nyquist — that is the
-    entire point of choosing one (noise suppression at the cost of resolution)."""
-    ramp, f = _filt(name="ramp"), _filt(name=name)
-    assert (f <= ramp + 1e-9).all()
-    assert float(f[32]) < 0.9 * float(ramp[32])
-
-
-def test_fourier_filter_rejects_odd_size_and_unknown_name():
-    """Odd sizes would make the symmetric construction meaningless, and a typo in
-    a filter name must not silently fall back to the ramp."""
-    with pytest.raises(ValueError):
-        _filt(size=63)
-    with pytest.raises(ValueError):
-        _filt(name="gaussian")
-
-
-def test_fourier_filter_matches_across_dtypes():
-    f32 = _filt(dtype=torch.float32)
-    f64 = _filt(dtype=torch.float64)
-    assert f32.dtype == torch.float32 and f64.dtype == torch.float64
-    assert torch.allclose(f32.double(), f64, atol=1e-5)
-
-
-def test_filter_sinogram_preserves_shape_and_dtype():
-    for dtype in (torch.float32, torch.float64):
-        Y = torch.randn(2, 1, 7, 20, dtype=dtype)
-        out = filter_sinogram(Y)
-        assert out.shape == Y.shape and out.dtype == dtype
-
-
-def test_filter_sinogram_requires_4d():
-    """Shape (B, C, angles, detectors) is load-bearing: the filter runs along the
-    last axis, so a 3-D sinogram would be filtered along the wrong one."""
-    with pytest.raises(ValueError):
-        filter_sinogram(torch.randn(3, 8, 8))
-
-
-def test_filter_sinogram_is_linear():
-    """Filtering is a convolution, so superposition must hold exactly — this is
-    what lets the adapters treat FBP as a linear operator when composing it with
-    projections."""
-    a, b = 2.5, -0.75
-    Y1 = torch.randn(2, 1, 5, 16, dtype=torch.float64)
-    Y2 = torch.randn(2, 1, 5, 16, dtype=torch.float64)
-    lhs = filter_sinogram(a * Y1 + b * Y2)
-    rhs = a * filter_sinogram(Y1) + b * filter_sinogram(Y2)
-    assert rel(lhs, rhs) < 1e-10
-
-
-def test_filter_sinogram_treats_rows_independently():
-    """Each projection angle is filtered on its own; a leak between rows would
-    mix angles before backprojection."""
-    Y = torch.randn(1, 1, 4, 16, dtype=torch.float64)
-    full = filter_sinogram(Y)
-    one = filter_sinogram(Y[:, :, 2:3, :] * 4)      # same row, scaled, alone
-    # 4 angles vs 1 changes only the pi/(2*n_angles) normalisation.
-    assert rel(one / 4 * (1 / 4), full[:, :, 2:3, :]) < 1e-10
-
-
-def test_filter_sinogram_scales_with_the_angle_count():
-    """The pi/(2*n_angles) factor is the FBP normalisation: doubling the number
-    of projections must halve each one's contribution, or the reconstruction
-    scales with how finely the scan was sampled."""
-    row = torch.randn(1, 1, 1, 16, dtype=torch.float64)
-    one = filter_sinogram(row)
-    four = filter_sinogram(row.repeat(1, 1, 4, 1))
-    assert rel(four[:, :, 0:1, :] * 4, one) < 1e-10
-
-
-@pytest.mark.parametrize("name", _FILTERS)
-def test_filter_sinogram_cache_is_populated_and_used(name):
-    """The cache is keyed by padded size / name / device / dtype. A key collision
-    would silently apply the wrong filter, so check both that a hit is reused and
-    that a different filter does not hit the same entry."""
-    cache = {}
-    Y = torch.randn(1, 1, 3, 12, dtype=torch.float64)
-    first = filter_sinogram(Y, name, fourier_filter_cache=cache)
-    assert len(cache) == 1
-    second = filter_sinogram(Y, name, fourier_filter_cache=cache)
-    assert len(cache) == 1 and torch.equal(first, second)
-    assert torch.equal(first, filter_sinogram(Y, name))     # cache changes nothing
-    filter_sinogram(Y, "hann", fourier_filter_cache=cache)
-    assert len(cache) == (1 if name == "hann" else 2)
-
-
-def test_filter_sinogram_pads_to_at_least_64():
-    """Short detector rows are zero-padded to 64 before the FFT so the circular
-    convolution does not wrap the row onto itself."""
-    narrow = torch.zeros(1, 1, 1, 4, dtype=torch.float64)
-    narrow[0, 0, 0, 0] = 1.0
-    out = filter_sinogram(narrow)
-    assert out.shape == narrow.shape and torch.isfinite(out).all()
-    # An impulse at one end must not produce its ringing at the other end with
-    # the same magnitude, which is what wrap-around would look like.
-    assert abs(float(out[0, 0, 0, -1])) < abs(float(out[0, 0, 0, 0]))
 
 # =========================================================================== #
 # Numeric helpers — the image-quality metrics and small tensor utilities in

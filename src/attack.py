@@ -33,7 +33,7 @@ import torch
 import torch.nn as nn
 
 from src.ellipse_dataloader import get_ellipse_dataloader
-from src.radon import AstraRadonAdapter, MatrixRadonAdapter
+from src.radon import MatrixRadonAdapter
 from src.utils import (
     build_models,
     decompose_error,
@@ -72,6 +72,11 @@ N_TRAIN = 4000
 N_TEST = 1000
 SPLIT = "test"
 
+# The only init reconstruction: the truncated-SVD pseudoinverse A_la^+.
+# Kept as a name because it is also the on-disk directory the artifacts and
+# the trained checkpoints live under.
+INIT_NAME = "pinv"
+
 LIPSCHITZ_SAMPLES = 8
 LIPSCHITZ_ITERS = 8
 
@@ -103,7 +108,7 @@ def proj_l2_ball(delta: torch.Tensor, eps: Budget) -> torch.Tensor:
 
 def project_delta(delta: torch.Tensor, eps: Budget,
                   projector: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-    """Projection onto the feasible set S = range(P_ran) ∩ {||δ||_2 ≤ ε}."""
+    """Projection onto the feasible set S = range(A_la) ∩ {||δ||_2 ≤ ε}."""
     return projector(proj_l2_ball(projector(delta), eps))
 
 def suite_eps_batch(y_clean: torch.Tensor, eps_nominal: float) -> torch.Tensor:
@@ -144,51 +149,35 @@ class AttackResult:
     runtime_sec: float
 
 # --------------------------------------------------------------------------- #
-# Init reconstructor + model adapter.
+# Model adapter.
 # --------------------------------------------------------------------------- #
-class InitReconstructor:
-    """The operator that turns a sinogram into the image the network sees.
-
-    Two inits are supported, and they are the two the data generator writes to
-    disk: ``fbp`` (filtered backprojection over the measured angles) and
-    ``pinv`` (the limited-angle pseudoinverse A_la^+). The iterative inits that
-    used to live here -- Landweber and TV Chambolle-Pock -- are gone along with
-    their solvers: nothing was ever trained on them, and being non-differentiable
-    they forced every attack through the straight-through FBP surrogate."""
-
-    def __init__(self, init_method: str, radon):
-        if init_method not in ("fbp", "pinv"):
-            raise ValueError(f"Unsupported init method '{init_method}' (fbp or pinv).")
-        self.init_method = init_method
-        self.radon = radon
-
-    def __call__(self, y: torch.Tensor) -> torch.Tensor:
-        if self.init_method == "pinv":
-            return self.radon.backward_la(y)
-        return self.radon.fbp_la(y)
-
 class ModelAttackAdapter:
+    """Sinogram -> prediction, as one differentiable chain.
+
+    The chain is  y -> P_ran y -> x_init = A_la^+ P_ran y -> model(x_init).
+    Keeping the initial reconstruction outside the model means the same attack
+    code drives both architectures with no branching inside the attack."""
+
     def __init__(
         self,
         model: nn.Module,
-        init_reconstructor: InitReconstructor,
+        radon: MatrixRadonAdapter,
         projector: Callable[[torch.Tensor], torch.Tensor],
     ):
         self.model = model
-        self.init_reconstructor = init_reconstructor
+        self.radon = radon
         self.projector = projector
 
     def forward(self, y_adv: torch.Tensor, project: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sinogram -> (prediction, init reconstruction, projected sinogram).
 
         ``project`` is off inside the PGD loop, where the caller has already
-        projected onto the measured rows and needs the graph to start at the
-        perturbed sinogram itself."""       
-        
+        projected onto range(A_la) and needs the graph to start at the
+        perturbed sinogram itself."""
         if project:
             y_adv = self.projector(y_adv)
-        x_init = self.init_reconstructor(y_adv)
-        return self.model(x_init, y_adv), x_init, y_adv
+        x_init = self.radon.backward_la(y_adv)
+        return self.model(x_init), x_init, y_adv
 
 # --------------------------------------------------------------------------- #
 # Attack objective + algorithms.
@@ -236,7 +225,7 @@ def attack_objective(
     if objective == "null":
         # Null-space: reward only the null-space error component
         if radon is None:
-            raise ValueError(f"Objective 'null' requires a radon operator.")
+            raise ValueError("Objective 'null' requires a radon operator.")
         err = pred - x_gt
         return reduce_loss(radon.proj_null_image(err)**2)
 
@@ -265,9 +254,10 @@ def pgd_attack(
     """Projected gradient ascent on the sinogram perturbation -- the one attack
     the suite runs.
 
-    The feasible set is S = range(P_ran) intersect {||delta||_2 <= eps}: the
-    perturbation must live on the measured angles (anything else is not a
-    measurement an attacker could make) and stay inside the L2 budget. Each step is
+    The feasible set is S = range(A_la) intersect {||delta||_2 <= eps}: the
+    perturbation must itself be a measurement the scanner could have taken
+    (anything else is not a perturbation an attacker could make) and stay
+    inside the L2 budget. Each step is
 
         delta <- Pi_S( delta + alpha * normalize(grad_delta loss) )
 
@@ -279,7 +269,7 @@ def pgd_attack(
     others.
     """
     start = time.perf_counter()
-    radon = adapter.init_reconstructor.radon
+    radon = adapter.radon
     best_y_adv = y_clean.detach().clone()
     best_delta = torch.zeros_like(y_clean)
     best_score = -float("inf")
@@ -320,52 +310,31 @@ def load_summary(data_root: str) -> Dict:
 
 def build_radon(summary: Dict, device: torch.device,
                 dtype: torch.dtype = torch.float32, dense: bool = True):
-    angles = np.asarray(summary["angles"], dtype=np.float64)
-    phi = tuple(summary["phi"])  # already in radians
-    matrix_mode = int(summary.get("matrix_mode", 0))
-    if matrix_mode == 1:
-        return MatrixRadonAdapter(
-            resolution=int(summary["img_size"]),
-            angles=angles,
-            det_count=int(summary["det_count"]),
-            dx=float(summary["dx"]),
-            estimate_norm=False,
-            device=device,
-            dtype=dtype,
-            dense=dense,
-            phi=phi,
-            svd_threshold=float(summary.get("svd_threshold") or 0.0),
-            cache_dir="radon_cache",
-        )
-    return AstraRadonAdapter(
+    return MatrixRadonAdapter(
         resolution=int(summary["img_size"]),
-        angles=angles,
+        angles=np.asarray(summary["angles"], dtype=np.float64),
         det_count=int(summary["det_count"]),
-        clip_to_circle=False,
         dx=float(summary["dx"]),
         estimate_norm=False,
         device=device,
         dtype=dtype,
-        phi=phi,
+        dense=dense,
+        phi=tuple(summary["phi"]),  # already in radians
+        svd_threshold=float(summary["svd_threshold"]),
+        cache_dir="radon_cache",
     )
 
 def load_model_checkpoint(
-    init_method: str,
     model_name: str,
     radon,
     device: torch.device,
     model_dir: Optional[str] = None,
 ) -> nn.Module:
-    base = Path(model_dir) if model_dir else None
-    candidates = [
-        base / f"init_{init_method}" / "checkpoints" / f"{model_name}_best.pt"
-    ]
-    ckpt_path = next((p for p in candidates if p.exists()), None)
-    if ckpt_path is None:
-        searched = "\n  ".join(str(p) for p in candidates)
+    base = Path(model_dir) if model_dir else Path(".")
+    ckpt_path = base / f"init_{INIT_NAME}" / "checkpoints" / f"{model_name}_best.pt"
+    if not ckpt_path.exists():
         raise FileNotFoundError(
-            f"No checkpoint found for model '{model_name}' and init '{init_method}'. "
-            f"Searched:\n  {searched}"
+            f"No checkpoint found for model '{model_name}'. Searched:\n  {ckpt_path}"
         )
 
     model = build_models([model_name], radon=radon)[model_name].to(device)
@@ -656,7 +625,7 @@ def summarize_metrics(rows: List[Dict[str, float]]) -> Dict[str, float]:
 def estimate_lipschitz(
     model: nn.Module,
     clean_cache: List[Tuple],
-    radon = None,
+    radon,
 ) -> Dict[str, float]:
     """Operator-norm (local Lipschitz) estimate of the *learned correction*
     restricted to the null space of A_la.
@@ -672,36 +641,34 @@ def estimate_lipschitz(
     null-space input perturbation can be amplified into null-space output error,
     which is what governs worst-case robustness of the learned channel.
 
-    ``clean_cache`` entries only need to supply (x_gt, x_init, y_clean) as their
-    first three elements.
+    ``clean_cache`` entries only need to supply (x_gt, x_init, ...) as their
+    first two elements.
     """
-    if radon is not None:
-        proj = radon.proj_null_image
+    proj = radon.proj_null_image
     samples: List[float] = []
 
     for entry in clean_cache:
-        x_init, y_clean = entry[1], entry[2]
+        x_init = entry[1]
         for b in range(x_init.shape[0]):
             if len(samples) >= LIPSCHITZ_SAMPLES:
                 break
             x0 = x_init[b: b + 1].detach()
-            y0 = y_clean[b: b + 1].detach()
 
             def G(x: torch.Tensor) -> torch.Tensor:
                 # learned correction, output restricted to the null space
-                return proj(model(x, y0) - x) if radon is not None else model(x, y0) - x
-            d = proj(torch.randn_like(x0)) if radon is not None else torch.randn_like(x0)
+                return proj(model(x) - x)
+            d = proj(torch.randn_like(x0))
             d = d / (torch.linalg.norm(d.reshape(-1)) + 1e-12)
             for _ in range(LIPSCHITZ_ITERS):
                 _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
-                _, w = torch.autograd.functional.vjp(G, x0, proj(u) if radon is not None else u, strict=False)
-                w = proj(w) if radon is not None else w
+                _, w = torch.autograd.functional.vjp(G, x0, proj(u), strict=False)
+                w = proj(w)
                 nw = torch.linalg.norm(w.reshape(-1))
                 if nw < 1e-12:
                     break
                 d = w / nw
             _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
-            samples.append(float(torch.linalg.norm(proj(u).reshape(-1) if radon is not None else u.reshape(-1)).item()))
+            samples.append(float(torch.linalg.norm(proj(u).reshape(-1)).item()))
         if len(samples) >= LIPSCHITZ_SAMPLES:
             break
 
@@ -775,18 +742,11 @@ def make_other_sample_target(x_gt: torch.Tensor, generator: Optional[torch.Gener
         perm = (arange + shift) % b
     return x_gt[perm]
 
-def detect_suite_models(model_dir: Optional[str], init_method: str) -> List[str]:
-    """Return the known model names whose checkpoints exist for this init."""
+def detect_suite_models(model_dir: Optional[str]) -> List[str]:
+    """Return the model names whose checkpoints exist under ``model_dir``."""
     base = Path(model_dir) if model_dir else Path(".")
-    known = ["resnet", "nsn", "dpnsn", "dpnsn_res"]
-    found = []
-    for m in known:
-        candidates = [
-            base / f"init_{init_method}" / "checkpoints" / f"{m}_best.pt"
-        ]
-        if any(p.exists() for p in candidates):
-            found.append(m)
-    return found
+    ckpt_dir = base / f"init_{INIT_NAME}" / "checkpoints"
+    return [m for m in ("resnet", "nsn") if (ckpt_dir / f"{m}_best.pt").exists()]
 
 @dataclass
 class RunSetup:
@@ -801,7 +761,6 @@ class RunSetup:
     radon: object
     noise_rel: float
     mean_sino_norm: float
-    inits: List[str]
     out_root: Path
 
 def prepare_run(args) -> RunSetup:
@@ -810,36 +769,32 @@ def prepare_run(args) -> RunSetup:
         raise ValueError("requires --data-root (used to infer dataset type and init methods).")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     summary = load_summary(args.data_root)
-    dataset_shape = str(summary.get("dataset"))
     noise_rel = float(summary.get("noise_sigma_rel") or 0.0)
-    inits = [args.init.lower()] if args.init else detect_data_inits(args.data_root)
-    if not inits:
+    if not (Path(args.data_root) / INIT_NAME).is_dir():
         raise FileNotFoundError(
-            f"No init-reconstruction folders (fbp, pinv) found in {args.data_root}.")
+            f"No '{INIT_NAME}' init-reconstruction folder found in {args.data_root}.")
     return RunSetup(
         device=device,
         summary=summary,
         radon=build_radon(summary, device=device, dtype=torch.float64 if F64 else torch.float32, dense=not SPARSE),
         noise_rel=noise_rel,
         mean_sino_norm=float(summary.get("mean_norm_y") or 0.0),
-        inits=inits,
         out_root=Path(args.out_dir or f"attacks_n{noise_rel}"),
     )
 
-def build_init_inputs(args, radon, init_method: str, max_samples: int, device):
-    """Loader, init reconstructor, range projector and the shared input cache for
-    one init method — identical in both run modes, so it lives once.
+def build_init_inputs(args, radon, max_samples: int, device):
+    """Range projector and the shared input cache — identical in both run modes,
+    so it lives once.
 
-    Returns (init_reconstructor, projector, input_cache). The cache is what makes
-    every model see byte-identical inputs, which is the basis for comparing them."""
+    Returns (projector, input_cache). The cache is what makes every model see
+    byte-identical inputs, which is the basis for comparing them."""
     loader = get_ellipse_dataloader(
-        init_recon=init_method, batch_size=BATCH_SIZE,
+        batch_size=BATCH_SIZE,
         split=SPLIT, n_train=N_TRAIN, n_test=N_TEST,
         shuffle=False, num_workers=NUM_WORKERS, data_root=args.data_root,
     )
-    init_recon = InitReconstructor(init_method=init_method, radon=radon)
     proj = lambda y: radon.proj_ran(y)
-    return init_recon, proj, build_input_cache(proj, loader, max_samples, device)
+    return proj, build_input_cache(proj, loader, max_samples, device)
 
 def build_input_cache(projector, loader, max_samples: int, device) -> List[Tuple]:
     """Cache the model-independent (x_gt, x_init, y_clean) inputs once so every
@@ -859,8 +814,7 @@ def build_input_cache(projector, loader, max_samples: int, device) -> List[Tuple
     return cache
 
 def build_example_row(radon, x_gt, clean_init, adv_init, clean_pred, adv_pred,
-                      y_clean, adv_y, delta, i: int,
-                      init_reconstructor: Optional["InitReconstructor"] = None) -> Dict:
+                      y_clean, adv_y, delta, i: int) -> Dict:
     """Assemble one example-image row (GT, inits, preds, sinos and range/null
     error decompositions) for the saved examples bundle (rendered later by
     visualise.save_examples)."""
@@ -908,58 +862,44 @@ def build_example_row(radon, x_gt, clean_init, adv_init, clean_pred, adv_pred,
     row["m_nul_init_clean"] = _component_metrics(gt_np, row["e_nul_init_clean"])
     row["m_ran_init_adv"] = _component_metrics(gt_np, row["e_ran_init_adv"])
     row["m_nul_init_adv"] = _component_metrics(gt_np, row["e_nul_init_adv"])
-    if init_reconstructor is not None:
-        # Reference for the NSN range-shift identity: Delta e_ran should equal
-        # proj_ran(R_init(delta)), where R_init is the operator that produced
-        # the network input (exact init mode). Both inits are linear, so the
-        # identity holds for either.
-        e_ran_init_d, _ = decompose_error(
-            init_reconstructor(delta[i:i + 1]), radon)
-        row["proj_ran_init_delta"] = e_ran_init_d.squeeze().numpy()
+    # Reference for the NSN range-shift identity: Delta e_ran should equal
+    # proj_ran(A_la^+ delta). A_la^+ is linear, so the identity holds exactly.
+    e_ran_init_d, _ = decompose_error(radon.backward_la(delta[i:i + 1]), radon)
+    row["proj_ran_init_delta"] = e_ran_init_d.squeeze().numpy()
     return row
-
-def detect_data_inits(data_root) -> List[str]:
-    """Init-reconstruction folders present in a data directory (each holding .npy)."""
-    root = Path(data_root)
-    known = ["fbp", "pinv"]
-    return [m for m in known if (root / m).is_dir() and any((root / m).glob("*.npy"))]
 
 def _stack_chunks(chunks: List[torch.Tensor]) -> np.ndarray:
     """Concatenate per-batch [B,1,H,W] tensor chunks and drop the channel axis,
     giving a single [N,H,W] numpy array for the .npz attack_output archive."""
     return torch.cat(chunks, dim=0)[:, 0].numpy()
 
-def run_suite_for_init(args, init_method: str, radon, summary: Dict,
-                       noise_rel: float, eps_nominal: float,
-                       attacks_root: Path, alpha: float) -> bool:
-    """Run the six-attack suite for one init method and write every artifact to
-    disk. Returns False (and skips) when no model checkpoints exist for it.
+def run_suite(args, radon, summary: Dict,
+              noise_rel: float, eps_nominal: float,
+              attacks_root: Path, alpha: float) -> bool:
+    """Run the five-attack suite and write every artifact to disk. Returns False
+    (and skips) when no model checkpoints exist.
 
     This function only *computes and saves*; it never plots. The figures are
     produced afterwards by ``visualise.py`` from the artifacts written here."""
     device = radon.device
-    model_names = detect_suite_models(args.model_dir, init_method)
+    model_names = detect_suite_models(args.model_dir)
     if not model_names:
-        print(f"[suite] init '{init_method}': no checkpoints found under "
-              f"'{args.model_dir}', skipping.")
+        print(f"[suite] no checkpoints found under '{args.model_dir}', skipping.")
         return False
-    print(f"\n[suite] ===== init '{init_method}'  models={model_names} =====")
+    print(f"\n[suite] ===== models={model_names} =====")
 
-    init_reconstructor, projector, input_cache = build_init_inputs(
-        args, radon, init_method, MAX_SAMPLES, device)
+    projector, input_cache = build_init_inputs(args, radon, MAX_SAMPLES, device)
 
     # Load every model + adapter once (reused for both attacking and transfer).
     models: Dict[str, nn.Module] = {}
     adapters: Dict[str, ModelAttackAdapter] = {}
     for name in model_names:
-        m = load_model_checkpoint(init_method=init_method, model_name=name,
-                                  radon=radon, device=device,
+        m = load_model_checkpoint(model_name=name, radon=radon, device=device,
                                   model_dir=args.model_dir)
         models[name] = m
-        adapters[name] = ModelAttackAdapter(model=m, init_reconstructor=init_reconstructor,
-                                            projector=projector)
+        adapters[name] = ModelAttackAdapter(model=m, radon=radon, projector=projector)
 
-    out_root = attacks_root / f"init_{init_method}"
+    out_root = attacks_root / f"init_{INIT_NAME}"
     out_root.mkdir(parents=True, exist_ok=True)
 
     for attack_name in _SUITE_ATTACKS:
@@ -983,7 +923,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
 
             for bi, (x_gt, clean_init, y_clean) in enumerate(input_cache):
                 with torch.no_grad():
-                    clean_pred = model(clean_init, y_clean)
+                    clean_pred = model(clean_init)
                 eps_batch = suite_eps_batch(y_clean, eps_nominal)
 
                 # Targeted attacks steer the recon toward a fixed reference:
@@ -1019,7 +959,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
                 def make_example_row(j):
                     return build_example_row(
                         radon, x_gt, clean_init, adv_init, clean_pred, adv_pred,
-                        y_clean, y_adv, delta, j, init_reconstructor=init_reconstructor)
+                        y_clean, y_adv, delta, j)
 
                 slots = SUITE_EXAMPLES - len(example_rows)
                 for j in range(min(x_gt.shape[0], max(slots, 0))):
@@ -1106,7 +1046,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
         clean_preds0: Dict[str, torch.Tensor] = {}
         for target in model_names:
             with torch.no_grad():
-                clean_preds0[target] = models[target](clean_init0, y_clean0)
+                clean_preds0[target] = models[target](clean_init0)
             for source, pert in transfer_pert.items():
                 with torch.no_grad():
                     y_t = projector(y_clean0 + pert)
@@ -1129,7 +1069,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
     
     lip_res: Dict[str, Dict[str, float]] = {}
     for name in model_names:
-        lip_res[name] = estimate_lipschitz(model=models[name], clean_cache=input_cache, radon=None)#radon,)
+        lip_res[name] = estimate_lipschitz(model=models[name], clean_cache=input_cache, radon=radon)
         r = lip_res[name]
         print(f"[suite][lipschitz] {name} mean={r['mean']:.4g} "
               f"max={r['max']:.4g} (n={r['n']})")
@@ -1138,7 +1078,7 @@ def run_suite_for_init(args, init_method: str, radon, summary: Dict,
         with open(out_root / "lipschitz.json", "w", encoding="utf-8") as f:
             json.dump(lip_res, f, indent=2)
 
-    print(f"[suite] init '{init_method}' done -> {out_root}")
+    print(f"[suite] done -> {out_root}")
     return True
 
 
@@ -1245,12 +1185,12 @@ def write_aggregate_summary(attacks_root) -> List[Dict[str, float]]:
               f"{rec.get('rel_l2_ratio_mean', float('nan')):>19.4f}")
     return records
 
-def detect_epoch_checkpoints(model_dir: Optional[str], init_method: str,
+def detect_epoch_checkpoints(model_dir: Optional[str],
                             model_name: str) -> List[Tuple[int, Path]]:
     """Per-epoch checkpoints ``{model}_epoch{NNN}.pt`` written by train.py with
-    --checkpoint-every-epoch, returned as [(epoch, path), ...] sorted by epoch."""
+    --checkpoint-every N, returned as [(epoch, path), ...] sorted by epoch."""
     base = Path(model_dir) if model_dir else Path(".")
-    d = base / f"init_{init_method}" / "checkpoints"
+    d = base / f"init_{INIT_NAME}" / "checkpoints"
     out: List[Tuple[int, Path]] = []
     if d.is_dir():
         for pth in d.glob(f"{model_name}_epoch*.pt"):
@@ -1261,13 +1201,13 @@ def detect_epoch_checkpoints(model_dir: Optional[str], init_method: str,
             out.append((epoch, pth))
     return sorted(out)
 
-def load_epoch_history(model_dir: Optional[str], init_method: str,
+def load_epoch_history(model_dir: Optional[str],
                        model_name: str) -> Tuple[Dict[int, Tuple[float, float]], Optional[int]]:
     """Read {model}_history.json into {epoch: (train_loss, val_loss)} plus the
     best epoch, so the epoch-attack study can overlay attackability on the loss
     curves. Returns ({}, None) when no history was written."""
     base = Path(model_dir) if model_dir else Path(".")
-    hp = base / f"init_{init_method}" / "checkpoints" / f"{model_name}_history.json"
+    hp = base / f"init_{INIT_NAME}" / "checkpoints" / f"{model_name}_history.json"
     if not hp.exists():
         return {}, None
     blob = json.loads(hp.read_text(encoding="utf-8"))
@@ -1282,13 +1222,13 @@ def run_epoch_study(args) -> None:
 
     This isolates *when* attackability arises during training and whether it
     tracks overfitting (validation loss diverging from training loss). For each
-    init and model it loads every {model}_epoch{NNN}.pt, runs one PGD attack
-    (total-error objective) on the shared sample cache, and writes
-    epoch_study/{init}_{model}.csv (rendered by visualise.save_epoch_study_plots).
-    Requires train.py to have been run with --checkpoint-every-epoch."""
+    model it loads every {model}_epoch{NNN}.pt, runs one PGD attack (total-error
+    objective) on the shared sample cache, and writes
+    epoch_study/pinv_{model}.csv (rendered by visualise.save_epoch_study_plots).
+    Requires train.py to have been run with --checkpoint-every N."""
     setup = prepare_run(args)
-    device, summary, radon = setup.device, setup.summary, setup.radon
-    inits, out_root = setup.inits, setup.out_root
+    device, radon = setup.device, setup.radon
+    out_root = setup.out_root
 
     eps_nominal = EPOCH_EPS
 
@@ -1302,91 +1242,86 @@ def run_epoch_study(args) -> None:
                     if getattr(args, "models", None) else None)
 
     wrote_any = False
-    for init_method in inits:
-        init_reconstructor, projector, input_cache = build_init_inputs(
-            args, radon, init_method, MAX_SAMPLES, device)
+    projector, input_cache = build_init_inputs(args, radon, MAX_SAMPLES, device)
 
-        found = detect_suite_models(args.model_dir, init_method)
-        if model_filter is not None:
-            unknown = [m for m in model_filter if m not in found]
-            if unknown:
-                raise ValueError(
-                    f"--models requested {unknown} but init '{init_method}' only has "
-                    f"checkpoints for {found}.")
-            found = [m for m in found if m in model_filter]
-        for model_name in found:
-            ckpts = detect_epoch_checkpoints(args.model_dir, init_method, model_name)
-            if not ckpts:
-                print(f"[epoch-study] init '{init_method}' model '{model_name}': "
-                      f"no per-epoch checkpoints (train with --checkpoint-every-epoch), skipping.")
-                continue
-            hist, best_epoch = load_epoch_history(args.model_dir, init_method, model_name)
-            print(f"\n[epoch-study] init '{init_method}' model '{model_name}': "
-                  f"{len(ckpts)} epochs")
-            rows_out: List[Dict[str, float]] = []
-            for epoch, ckpt_path in ckpts:
-                model = build_models([model_name], radon=radon)[model_name].to(device)
-                model.load_state_dict(torch.load(ckpt_path, map_location=device)["state_dict"])
-                model.eval()
-                adapter = ModelAttackAdapter(model=model, init_reconstructor=init_reconstructor,
-                                             projector=projector)
-                rows: List[Dict[str, float]] = []
-                processed = 0
-                for x_gt, clean_init, y_clean in input_cache:
-                    with torch.no_grad():
-                        clean_pred = model(clean_init, y_clean)
-                    eps_batch = suite_eps_batch(y_clean, eps_nominal)
-                    result = pgd_attack(
-                        adapter=adapter, x_gt=x_gt, y_clean=y_clean,
-                        clean_pred=clean_pred, eps=eps_batch, alpha=suite_alpha,
-                        objective="mse")
-                    with torch.no_grad():
-                        adv_pred, adv_init, y_adv = adapter.forward(result.y_adv)
-                    rows.extend(evaluate_batch(
-                        x_gt=x_gt, clean_init=clean_init, clean_y=y_clean, clean_pred=clean_pred,
-                        adv_init=adv_init, adv_y=y_adv, adv_pred=adv_pred, delta=result.delta,
-                        success_mse_factor=SUCCESS_MSE_FACTOR, radon=radon))
-                    processed += x_gt.shape[0]
-                    if processed >= args.max_samples:
-                        break
-                m = summarize_metrics(rows)
-                tr, va = hist.get(epoch, (float("nan"), float("nan")))
-                rows_out.append({
-                    "epoch": epoch, "train_loss": tr, "val_loss": va,
-                    "is_best": int(best_epoch is not None and epoch == best_epoch),
-                    "clean_rel_l2_median": m.get("clean_rel_l2_median", float("nan")),
-                    "adv_rel_l2_mean": m.get("adv_rel_l2_mean", float("nan")),
-                    "adv_rel_l2_median": m.get("adv_rel_l2_median", float("nan")),
-                    "rel_l2_ratio_median": m.get("rel_l2_ratio_median", float("nan")),
-                    "adv_e_nul_frac_median": m.get("adv_e_nul_frac_median", float("nan")),
-                    "adv_consistency_rel_median": m.get("adv_consistency_rel_median", float("nan")),
-                    "adv_consistency_vs_clean_rel_median": m.get(
-                        "adv_consistency_vs_clean_rel_median", float("nan")),
-                })
-                print(f"  epoch {epoch:03d}  val={va:.5f}  adv_rel_l2(med)="
-                      f"{rows_out[-1]['adv_rel_l2_median']:.4f}  ratio(med)="
-                      f"{rows_out[-1]['rel_l2_ratio_median']:.3f}")
-            csv_path = study_dir / f"{init_method}_{model_name}.csv"
-            with open(csv_path, "w", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
-                writer.writeheader()
-                writer.writerows(rows_out)
-            wrote_any = True
-            print(f"[epoch-study] wrote {csv_path}")
+    found = detect_suite_models(args.model_dir)
+    if model_filter is not None:
+        unknown = [m for m in model_filter if m not in found]
+        if unknown:
+            raise ValueError(
+                f"--models requested {unknown} but only {found} have checkpoints.")
+        found = [m for m in found if m in model_filter]
+    for model_name in found:
+        ckpts = detect_epoch_checkpoints(args.model_dir, model_name)
+        if not ckpts:
+            print(f"[epoch-study] model '{model_name}': no per-epoch checkpoints "
+                  f"(train with --checkpoint-every N), skipping.")
+            continue
+        hist, best_epoch = load_epoch_history(args.model_dir, model_name)
+        print(f"\n[epoch-study] model '{model_name}': {len(ckpts)} epochs")
+        rows_out: List[Dict[str, float]] = []
+        for epoch, ckpt_path in ckpts:
+            model = build_models([model_name], radon=radon)[model_name].to(device)
+            model.load_state_dict(torch.load(ckpt_path, map_location=device)["state_dict"])
+            model.eval()
+            adapter = ModelAttackAdapter(model=model, radon=radon, projector=projector)
+            rows: List[Dict[str, float]] = []
+            processed = 0
+            for x_gt, clean_init, y_clean in input_cache:
+                with torch.no_grad():
+                    clean_pred = model(clean_init)
+                eps_batch = suite_eps_batch(y_clean, eps_nominal)
+                result = pgd_attack(
+                    adapter=adapter, x_gt=x_gt, y_clean=y_clean,
+                    clean_pred=clean_pred, eps=eps_batch, alpha=suite_alpha,
+                    objective="mse")
+                with torch.no_grad():
+                    adv_pred, adv_init, y_adv = adapter.forward(result.y_adv)
+                rows.extend(evaluate_batch(
+                    x_gt=x_gt, clean_init=clean_init, clean_y=y_clean, clean_pred=clean_pred,
+                    adv_init=adv_init, adv_y=y_adv, adv_pred=adv_pred, delta=result.delta,
+                    success_mse_factor=SUCCESS_MSE_FACTOR, radon=radon))
+                processed += x_gt.shape[0]
+                if processed >= args.max_samples:
+                    break
+            m = summarize_metrics(rows)
+            tr, va = hist.get(epoch, (float("nan"), float("nan")))
+            rows_out.append({
+                "epoch": epoch, "train_loss": tr, "val_loss": va,
+                "is_best": int(best_epoch is not None and epoch == best_epoch),
+                "clean_rel_l2_median": m.get("clean_rel_l2_median", float("nan")),
+                "adv_rel_l2_mean": m.get("adv_rel_l2_mean", float("nan")),
+                "adv_rel_l2_median": m.get("adv_rel_l2_median", float("nan")),
+                "rel_l2_ratio_median": m.get("rel_l2_ratio_median", float("nan")),
+                "adv_e_nul_frac_median": m.get("adv_e_nul_frac_median", float("nan")),
+                "adv_consistency_rel_median": m.get("adv_consistency_rel_median", float("nan")),
+                "adv_consistency_vs_clean_rel_median": m.get(
+                    "adv_consistency_vs_clean_rel_median", float("nan")),
+            })
+            print(f"  epoch {epoch:03d}  val={va:.5f}  adv_rel_l2(med)="
+                  f"{rows_out[-1]['adv_rel_l2_median']:.4f}  ratio(med)="
+                  f"{rows_out[-1]['rel_l2_ratio_median']:.3f}")
+        csv_path = study_dir / f"{INIT_NAME}_{model_name}.csv"
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows_out)
+        wrote_any = True
+        print(f"[epoch-study] wrote {csv_path}")
 
     if not wrote_any:
         raise FileNotFoundError(
-            "No per-epoch checkpoints found. Train with train.py --checkpoint-every-epoch first.")
+            "No per-epoch checkpoints found. Train with train.py --checkpoint-every N first.")
     print(f"\n[epoch-study] done -> {study_dir}")
     print(f"[epoch-study] render curves with:  python visualise.py {out_root}")
 
 def run_attack_suite(args) -> None:
     if not args.data_root:
-        raise ValueError("requires --data-root (used to infer dataset type and init methods).")
+        raise ValueError("requires --data-root (it holds summary.json and the data).")
     setup = prepare_run(args)
-    device, summary, radon = setup.device, setup.summary, setup.radon
+    summary, radon = setup.summary, setup.radon
     noise_rel = setup.noise_rel
-    inits, attacks_root = setup.inits, setup.out_root
+    attacks_root = setup.out_root
 
     eps_nominal = args.suite_eps if args.suite_eps is not None else noise_rel
     if eps_nominal <= 0:
@@ -1395,17 +1330,14 @@ def run_attack_suite(args) -> None:
 
     suite_alpha = suite_step_size(eps_nominal, setup.mean_sino_norm, SUITE_STEPS)
     # eps is a relative L2 fraction: the per-sample budget is eps*||y_i||_2.
-    print(f"[suite] dataset={summary.get('dataset')}"
-          f"eps={eps_nominal:g}*||y||  alpha={suite_alpha:.4g}  inits={inits}")
-    
+    print(f"[suite] dataset={summary.get('dataset')}  "
+          f"eps={eps_nominal:g}*||y||  alpha={suite_alpha:.4g}")
+
     print(f"[suite] attacks ({len(_SUITE_ATTACKS)}): {', '.join(_SUITE_ATTACKS)}")
-    ran_any = False
-    for init_method in inits:
-        ran_any |= run_suite_for_init(args, init_method, radon, summary,
-                                      noise_rel, eps_nominal, attacks_root, suite_alpha)
-    if not ran_any:
+    if not run_suite(args, radon, summary, noise_rel, eps_nominal,
+                     attacks_root, suite_alpha):
         raise FileNotFoundError(
-            f"No checkpoints found under model-dir '{args.model_dir}' for any detected init {inits}."
+            f"No checkpoints found under model-dir '{args.model_dir}'."
         )
     
     write_aggregate_summary(attacks_root)
@@ -1427,10 +1359,7 @@ def parse():
                         help="Path to the {example}_out data directory (holds summary.json and the "
                              "per-init reconstruction folders). Required.")
     parser.add_argument("--model-dir", default=None,
-                        help="Base dir containing init_{init}/checkpoints/{model}_best.pt (default: .).")
-    parser.add_argument("--init", default=None, choices=["fbp", "pinv"],
-                        help="Restrict the suite to a single init method. Default: every init "
-                             "reconstruction folder detected under --data-root.")
+                        help="Base dir containing init_pinv/checkpoints/{model}_best.pt (default: .).")
     parser.add_argument("--out-dir", default=None,
                         help="Output directory (default: attacks_n<noise>).")
     parser.add_argument("--suite-eps", type=float, default=None,
@@ -1446,16 +1375,17 @@ def parse():
     # ---- optional analysis ----
     parser.add_argument("--epoch-study", action="store_true",
                         help="Instead of the attack suite, attack every saved training "
-                             "epoch individually (needs train.py --checkpoint-every-epoch) "
+                             "epoch individually (needs train.py --checkpoint-every N) "
                              "and tabulate adversarial error vs epoch + train/val loss.")
     parser.add_argument("--models", default=None,
                         help="Comma-separated model subset for --epoch-study (e.g. "
-                             "'nsn,dpnsn'). Default: every model with checkpoints. Each "
-                             "model writes its own epoch_study/<init>_<model>.csv, so one "
+                             "'nsn'). Default: every model with checkpoints. Each "
+                             "model writes its own epoch_study/pinv_<model>.csv, so one "
                              "model per Slurm array task parallelises the study cleanly.")
     parser.add_argument("--lipschitz", action="store_true",
-                        help="Also estimate the null-restricted local Lipschitz constant of each "
-                             "model's learned correction (attack-independent robustness measure).")
+                        help="(Always on.) Estimate the null-restricted local Lipschitz constant "
+                             "of each model's learned correction (attack-independent robustness "
+                             "measure).")
     return parser.parse_args()
 
 

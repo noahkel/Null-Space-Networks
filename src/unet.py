@@ -31,14 +31,16 @@ class Down(nn.Module):
 
 
 class Up(nn.Module):
-    def __init__(self, in_channels, out_channels, bilinear=True):
+    """Bilinear upsampling, skip concatenation, double convolution.
+
+    The double convolution's intermediate channel count is half its input, so
+    the channel doubling caused by the concatenation is undone.
+    """
+
+    def __init__(self, in_channels, out_channels):
         super().__init__()
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
-        else:
-            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, 2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -59,19 +61,20 @@ class OutConv(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, bilinear=True):
+    """Single-channel image-to-image UNet, 17.25 M trainable parameters."""
+
+    def __init__(self):
         super().__init__()
-        self.inc = DoubleConv(in_channels, 64)
+        self.inc = DoubleConv(1, 64)
         self.down1 = Down(64, 128)
         self.down2 = Down(128, 256)
         self.down3 = Down(256, 512)
-        factor = 2 if bilinear else 1
-        self.down4 = Down(512, 1024 // factor)
-        self.up1 = Up(1024, 512 // factor, bilinear)
-        self.up2 = Up(512, 256 // factor, bilinear)
-        self.up3 = Up(256, 128 // factor, bilinear)
-        self.up4 = Up(128, 64, bilinear)
-        self.outc = OutConv(64, out_channels)
+        self.down4 = Down(512, 512)
+        self.up1 = Up(1024, 256)
+        self.up2 = Up(512, 128)
+        self.up3 = Up(256, 64)
+        self.up4 = Up(128, 64)
+        self.outc = OutConv(64, 1)
 
     def forward(self, x):
         x1 = self.inc(x)

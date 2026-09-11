@@ -71,7 +71,7 @@ Consequently research on ways to reduce the amount of measurements, while still 
 Another way, which will also be the focus of this work, relies on the reduction of the total angles covered. Instead of considering measurements across the full range from $0^\circ$ to $180^\circ$ one only measures from $0^\circ$ to $120^\circ$. This is called limited-angle CT. It is severely ill-posed and methods like the filtered back projection, which work well for conventional CT-scans, fail to provide good reconstruction images \parencite{CT-LA-CNN}.\\
 The reconstruction method used in this thesis is not only based on neural networks, but also on a classical reconstruction step. Classical reconstruction methods better understood and provide a good initial construction, which serves as an useful input to the neural network. The network therefore only needs to learns the negative error of the classical reconstruction method to the ground truth. 
 
-\subsection{Pseudoinverse}
+\subsection{Pseudoinverse}\label{sec:pseudoinverse}
 The Radon transform is the function, that can be used to model the x-ray measurement process. It builds the line integral of a function and is defined in the following way.
 $$\mathcal{R}f(L):=\int_Lf(\mathbf{x})d\mathbf{x}$$
 Where $R$ denotes the radon transform, $f:\Omega\to\mathbb{R}$ is an arbitrary, measurable function and $L\subset\Omega$ the line along which the measurement is taken.
@@ -92,7 +92,7 @@ Where $\mathbf{U}\in\mathbb R^{n\times n}$ and $\mathbf{V}\in\mathbb{R}^{m\times
 \Block{1-3}{\text{\Huge 0}} & & & \text{\Huge 0}                                  \\
 \end{pNiceArray}\mathbf{U}^*$$
 This pseudoinverse can then be used to convert a sinogram back to the axial image. Since in real world application sinogram data always comes with noise, To better represent real world applications we are also going to need to add some noise to the data, as real world measurements can never be noise free. But Noisy data reveals an issue with the pseudoinverse. The severe ill-posedness means, singular values $\sigma_i$ decay exponentially to zero. For the Pseudoinverse, this means its singular values $1/\sigma_i$ grow exponentially. Since noise is spread evenly across the singular values of the pseudoinverse, it is amplified exponentially and can overshadow the actual signal strength. To counteract this, one can use a truncated pseudoinverse, setting all singular values $\sigma_i$, smaller than some threshold $\tau$, to zero. When inverting, they remain zero and the amplification can be bounded with $1/\tau$.\\
-This gives rise to a nontrivial null space $\mathcal{N}(A_\mathcal{R})$ i.e. non trivial structures, that when measured give $0$ measurements. This allows us to decompose the space $\mathbb{R}^n$ into $\mathcal{N}(A_\mathcal{R})$ and $\mathcal{N}(A_\mathcal{R})^\perp$ which will be of use later in this work.\vspace{10pt}\\
+This gives rise to a nontrivial null space $\mathcal{N}(A)$ i.e. non trivial structures, that when measured give $0$ measurements. This allows us to decompose the space $\mathbb{R}^n$ into $\mathcal{N}(A)$ and $\mathcal{N}(A)^\perp$ which will be of use later in this work.\vspace{10pt}\\
 
 From now on, the space $\mathbf{Y}$ denotes the space of sinograms or more generally measurements and the space $\mathbf{X}$ the space of all images. Both spaces are finite dimensional.
 \subsection{Residual UNet}
@@ -136,8 +136,10 @@ A convolution restricts the number and location of the neurons in the next layer
 This figure illustrates the different applications, the red highlighted matrix outputs a $2\times 2$ grid of values, since it moves two values in between steps and therefore does not take any values twice. The blue one outputs a $3\times 3$ grid. It only moves one value in between steps and therefore takes some values multiple times. The U-Net uses the approach in the red matrix, which leads to a reduction in the number of neurons and weights. The memory gained by reducing neurons and weights is then used to introduce new feature channels. The $2\times2$ max pooling halves the spatial resolution but leaves the number of channels unchanged. The number of feature channels is then doubled by the first convolution of the following block, which uses twice as many filters as that block has input channels. After the contractive path, the expansive path applies a form of upsampling with another $2\times 2$ convolution, halving the number of feature channels. The upsampled data is then combined with some data from the corresponding downsampling step and twice more convolved, followed by a ReLU application. The original U-Net Network has 23 convolutional layers\parencite{U-NET}. Its original application has been for segmentation purposes, however it is also applicable for image to image prediction.
 \subsection{Null space Network}\label{sec:nsn}
 The Residual U-Net is a so called unconstrained Network, it can modify the data, however it desires, to predict its output. This can lead to problems, since it can happen, that the prediction made by the Residual U-Net does not necessarily agree with the measurements it was fed. One possible remedy to this issue is the so called Null Space Network. It's architecture is identical to the Residual U-Net with the exception, that the output of the Null Space Network is Projected onto the Null Space of the Forward Operator (i.e. the measurement process). This guarantees data consistency and we had hoped, that consequently the resulting network would be more robust towards adversarial attacks. Adversarial attacks on both residual UNet and Null space networks however, have shown, that this is not the case and that resistance towards adversarial attacks or robustness, do not come for free with data consistency.\\
-To use a Null Space Network, one has to know a Projection onto the Null Space of the Forward Operator or Measurement Process. This is where the Singular Value Decomposition comes in useful once more, the unitary matrix $\mathbf{V}$ along with the matrix rank $r$ can be used to calculate the Nullspace projection in the following way. Taking the last $n-r$ vectors of $\mathbf{V}$ in the following denoted by the $n\times (n-r)$ matrix $\mathbf{V}_r$, we can calculate the Projection $\mathbf{P}_{\mathcal{N}(\mathbf{A})}$ by
-$$\mathbf{P}_{\mathcal{N}(\mathbf{A})} = \mathbf{V}_r\mathbf{V}_r^*$$
+To use a Null Space Network, one has to know a Projection onto the Null Space of the Forward Operator or Measurement Process. This is where the Singular Value Decomposition comes in useful once more, the unitary matrix $\mathbf{V}$ can be used to calculate the Nullspace projection in the following way.
+%TODO: Edit pseudoinverse section to include ordering of singular values and vectors
+Taking the all $k$ vectors of $\mathbf{V}$ corresponding to all non zero singular values and arranging them in the matrix $\mathbf{V}_k$ allows us to calculate the Projection $\mathbf{P}_{\mathcal{N}(\mathbf{A})}$ by
+$$\mathbf{P}_{\mathcal{N}(\mathbf{A})} = \mathbf{I} - \mathbf{V}_k\mathbf{V}_k^*$$
 This allows us to express the Nullspace Network as a concatenation of the  projection $\mathbf{P}_{\mathcal{N}(\mathbf{A})}$ and the network, where $\mathbf{x}_\text{init}$ is an initial reconstruction obtained by some classical reconstruction method, in our case the Pseudoinverse $\mathbf{A}^+$.$$\mathbf{x}_\text{out} = \mathcal{F}_\theta(\mathbf{y})=\mathbf{x}_\text{init} + \mathbf{P}_{\mathcal{N}(\mathbf{A})}N_\theta(\mathbf{x}_\text{init})$$
 By Applying $\mathbf{A}$ to the above equation, it is easy to see, that the Network output can not modify the measurements gained from the initial reconstruction. The Network is provably data consistent. This also means, that it can never change the measurements. Any errors, that live in the input it has been given and produce non zero measurements, can never be corrected by the network. $$\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})} = 0 \implies \mathbf{A}\mathbf{x}_\text{out} = \mathbf{A}\mathbf{x}_\text{init}$$\\
 This is particularly an issue, considering that some noise will always be visible in the measurements, even after the application of the pseudoinverse. The error generated by this noise is not correctable by the Nullspace Network. Decomposing the reconstruction error $\mathbf{e}:=\mathbf{x}_\text{out}-\mathbf{x}^\dagger$ into its nullspace and nullspace-complement components makes this precise. The nullspace-complement component $(\mathbf{I}-\mathbf{P}_{\mathcal{N}(\mathbf{A})})\mathbf{e}$ of the reconstruction error is identical to that of the initial reconstruction, whatever the network predicts. We will refer to this as the \emph{range floor}. In the nullspace-complement the Nullspace Network can therefore never produce results that are comparable to those of the unconstrained residual network, which is free to correct this component and does.\\
@@ -152,7 +154,7 @@ the space of reconstructions. Everything in this section applies to both of the 
 of the previous chapter, the unconstrained residual network and the Nullspace Network, which
 differ only in whether the projection $\mathbf{P}_{\mathcal{N}(\mathbf{A})}$ is applied to the
 output of $N_\theta$. Where the distinction matters we say so explicitly.
-\subsection{Adversarial Attacks}
+\subsection{Adversarial Attacks}\label{sec:attacks}
 An adversarial attack is heavily dependent on the threat model. It defines how much information the attack is given and how we measure its success. The attack type that we are going to investigate in this work is the evasion type attack. As mentioned before, the aim is to find a small perturbation $\delta^* \in\mathbf{Y}$ defined by:
 $$\boldsymbol{\delta}^*\;=\argmax_{\lVert\boldsymbol{\delta}\rVert_p \leq \varepsilon}\;\mathcal{L}(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}), \mathbf{x}^\dagger )$$
 where $\mathbf{y}$ are the measurements, $\mathbf{x}^\dagger$ is the ground truth corresponding to them, $\mathcal{L}$ is a loss function and $\varepsilon\in\mathbb{R}_{>0}$ is the budget of the attack.
@@ -184,7 +186,8 @@ A last adaption concerns the feasible set. We investigate only those perturbatio
 measurements that an attacker could realistically produce, that is, perturbations which are
 themselves measurements taken at the angles the scanner actually covers. We therefore
 additionally require the perturbation to lie in $\operatorname{range}(\mathbf{A})$, which
-gives the feasible set $S:=\operatorname{range}(\mathbf{A})\cap B_\varepsilon$. Writing the
+%TODO: Define A_la and truncated A_la and full A at one point clean and stick to notation!
+gives the feasible set $S:=\operatorname{range}(\mathbf{A}_{la})\cap B_\varepsilon$. Writing the
 iteration in terms of the perturbation $\boldsymbol{\delta}_n:=\mathbf{y}_n-\mathbf{y}$
 instead of the sinogram itself, which translates both the iterate and the constraint set and
 therefore describes the same algorithm, the update rule becomes
@@ -234,9 +237,7 @@ two chapters are realised in code. The implementation is written in Python and
 rests on two libraries: PyTorch \parencite{Pytorch} provides the tensor algebra,
 the neural network layers and, most importantly for this work, reverse-mode
 automatic differentiation, and the ASTRA Toolbox \parencite{Astra} provides the
-tomographic geometry. Every number reported in this thesis was produced with
-%TODO: verify version!
-PyTorch 2.3.1 on a single NVIDIA RTX A6000.\\
+tomographic geometry. Every number reported in this thesis was produced with PyTorch 2.3.1 on a single NVIDIA RTX A6000.\\
 The central object of the implementation is the \emph{tensor}: a
 multidimensional array that carries a shape, a numeric type and the device it
 lives on (CPU or GPU), and that optionally records the operations which produced
@@ -254,15 +255,12 @@ containing only the measured rows; they return a \emph{full-shape} sinogram in
 which the rows belonging to unmeasured angles are set to zero. Every sinogram in
 a run therefore has the same shape, whether it was produced by the full or by
 the limited-angle operator, and the restriction to the measured angles is itself
-an operator, namely the multiplication with a $0/1$ mask.
-\subsection{Radon operator}
+an operator, namely the multiplication with a $0/1$ mask, we denote this mask in the following with $\mathbf{M}$.
+$\mathbf{M}$ is a tensor of shape $(n_\theta,n_d)$ with $1$ in the rows corresponding to measured angles and $0$ elsewhere.
+It is important to note, that $\mathbf{M}$ is different from the projection onto the space of viable measurements, $\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}$, since not every sinogram that is zero at the unmeasured angles can be obtained by measuring some image. So the space of viable measurements, $\operatorname{range}(\mathbf{A}_{la})$, is a proper subspace of the space of sinograms supported on the measured angles, i.e.\ of $\operatorname{range}(\mathbf{M})$. Both projections occur in the implementation and they are not interchangeable: it is $\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}$ that restricts the simulated noise of Section \ref{sec:data} and the adversarial perturbation of Section \ref{sec:adversarial}.\\
+\subsection{Radon operator}\label{sec:radon}
 For the implementation of the Radon operator, we used the Astra-Toolbox \parencite{Astra}. It is maintained by the University of Antwerp and supports different kinds of Radon operations. For this experimental setup, we used a 2D parallel-beam Computed Tomography. 
 The first step to obtaining a radon operator in the Astra-Toolbox is done by defining a Volume geometry. It defines the size of the image we want to reconstruct, which in turn determines the size of the emitter and detector array.
-
-
-
-
-
 The second descriptor is the projection geometry, which fixes the beam type
 (\texttt{parallel}), the spacing of the detector elements, their number, and the
 vector of projection angles. From the two descriptors a projector is built using
@@ -289,27 +287,15 @@ pixel spacing           & $\mathrm{d}x=1$ \\
 The detector count is chosen as $\lfloor\sqrt2\cdot128\rfloor+1=182$, that is, at
 least the length of the image diagonal, so that no corner of the image can fall
 outside the detector array for any projection angle.\\
-%TODO: ISNT THE MATRIX IMPLEMENTATION ENOUGH for this work?
-Two backends implement the same interface. The first, \texttt{AstraRadonAdapter},
-is matrix-free: forward projection and backprojection are calls into ASTRA,
-wrapped in \texttt{torch.autograd.Function} objects so that gradients flow
-through them. 
-%TODO:The following sentence is unclear to me, please explain in more detail
-The wrapping is possible because forward projection and
-backprojection are adjoint to one another, so the backward pass of the one is
-simply the other. This backend has no singular value decomposition available, so
-the pseudoinverse is replaced by the %TODO: add caveat, why fbp is not useful
-filtered backprojection and the null-space projection by 
-%TODO: Explain how conjugate gradients can be used to generate null-space projection
-conjugate gradients.\\
-The second backend, \texttt{MatrixRadonAdapter} uses ASTRA to construct the system matrix
-itself. Every result reported in this thesis uses this backend, because it is the one that 
-%TODO: better formulation: gives access to exact inversion via the pseudoinverse 
-makes the pseudoinverse and the null-space projection exact rather than iterative.
-%TODO: explain csr format?
-In python this is implemented in the following way:
+ASTRA is used to construct the system matrix itself rather than as a
+matrix-free forward and backprojection pair, because the matrix is what gives
+access to exact inversion: with its singular value decomposition at hand the
+pseudoinverse and the null-space projection are closed-form linear operators
+instead of the output of an iterative solver, and both are ordinary tensor
+products, which is what lets an attack gradient travel through them. In Python
+this is implemented in the following way:
 \begin{lstlisting}[language=Python]
-angles =  np.linspace(0, 120, 180, endpoint=False)
+angles = np.linspace(0, 180, 180, endpoint=False)
 vol_geom = astra.create_vol_geom(128, 128)
 proj_geom = astra.create_proj_geom('parallel', 1.0, 182, angles)
 projector_id = astra.create_projector('strip', proj_geom, vol_geom)
@@ -320,69 +306,69 @@ This creates a projector, callable by its id, that can be used to calculate the 
 The matrix is given as a \texttt{scipy.sparse.csr\_matrix}, compressed sparse row matrix, and will later be used to calculate the pseudoinverse and the nullspace projections.
 In the following, let $\mathbf{A}_\text{full}:=\texttt{csr}$ be the sparse matrix with dimensions $182*180\times 128*128 = 32\,760\times16\,384$. 
 From $\mathbf{A}_\text{full}$ we can construct the limited-angle matrix
-%TODO: Check is it as simple as that?
-$\mathbf{A}\in\mathbb{R}^{21\,840\times16\,384}$ obtained by keeping only the
-rows belonging to the $120$ measured angles. It is the latter that plays the
-role of $\mathbf{A}$ everywhere in the theory. We will refer to the limited angle matrix as $\mathbf{A}$ in the following sections.
-$\mathbf{A}$ models the limited angle Computed Tomography measurement process the networks aim to invert and the attacks perturb.\\
+$\mathbf{A}_{la}\in\mathbb{R}^{21\,840\times16\,384}$ obtained by keeping only the
+rows belonging to the $120$ measured angles. ASTRA orders the rows angle-major, so row $i\cdot n_d+j$ holds detector
+$j$ at angle $\theta_i$, $\mathbf{A}_{la}$ is obtained by only taking those rows corresponding to measured angles.
+It is $\mathbf{A}_{la}$ that plays the
+role of $\mathbf{A}$ everywhere in the theory.
+$\mathbf{A}_{la}$ models the limited angle Computed Tomography measurement process the networks aim to invert and the attacks perturb.\\
 Building the matrices and decomposing them is expensive but depends only on the
 geometry, never on the data. Both are therefore cached on disk under a SHA-256
 hash of the resolution, detector count, pixel spacing, angle vector,
 limited-angle window and truncation threshold, so that a rerun with the same
 geometry loads them instead of recomputing them.\\
-%TODO: DO WE NEED FBP EVEN?? CONNECTS TO TODO FROM ABOVE
-Filtered backprojection is needed --- for the ASTRA backend, and as an
-alternative initial reconstruction --- it is implemented in the Fourier domain:
-the sinogram is zero-padded along the detector axis to the next power of two of
-at least $2n_d$, transformed with an FFT, multiplied by the ramp filter and
-transformed back, before the backprojection is applied.
-
 \subsection{Pseudoinverse}
-The pseudoinverse of Section 1.2 requires the singular value decomposition of
+The pseudoinverse of Section \ref{sec:pseudoinverse} requires the singular value decomposition of
 the system matrix, and this is the single most expensive computation in the
-whole pipeline. Both $\mathbf{A}_\text{full}$ and $\mathbf{A}$ are densified in
-%TODO: Isnt it single precision in the faster workflow
-double precision and decomposed with \texttt{torch.linalg.svd} on the GPU; the
-larger of the two occupies $4.3$\,GB in that format, which fits comfortably on
-the A6000. If no GPU is available, or the matrix does not fit, the
-%TODO: Review, whether we actually need these fallbacks and remove them from implementation for simplification
-implementation falls back to a dense LAPACK decomposition on the CPU and, for
-matrices too large even for that, to an ARPACK decomposition operating directly
-on the sparse matrix.\\
-The truncation described in Section 1.2 is applied relative to the largest
-singular value,
-%TODO: Is this formulation correct?, write another reason for why we use relative scaling
-that way it is put in relation to the operator norm: a direction is retained if
+whole pipeline. $\mathbf{A}_{la}$ is densified in double precision and decomposed with
+%TODO: verify 2.9GB, when is the matrix present in single precision?
+\texttt{torch.linalg.svd} on the GPU, where it occupies $2.9$\,GB, which fits
+comfortably on the A6000. Without a GPU the same dense decomposition runs
+through LAPACK on the CPU, which is the path the test suite takes.\\
+The truncation described in Section \ref{sec:pseudoinverse} is applied relative to the largest
+singular value. A direction is retained if
 $$\sigma_i\;\geq\;\tau\,\sigma_{\max},\qquad \tau = 4\cdot10^{-3}.$$
-For the geometry above this keeps $14\,831$ of $16\,384$ directions for
-$\mathbf{A}_\text{full}$ and $11\,150$ of $16\,384$ for the limited-angle
-operator $\mathbf{A}$. 
-%TODO: Formulate the following sentence better!
-The second number is the important one: the numerical
-null space $\mathcal{N}(\mathbf{A})$ that the Nullspace Network operates in has
+Scaling the threshold by $\sigma_{\max}$ rather than fixing
+it absolutely puts the cutoff in relation to the operator norm, so $\tau$ is
+dimensionless and does not have to be re-tuned when the geometry --- and with that
+the scale of $\mathbf{A}_{la}$ --- changes. It also controls the conditioning of
+the retained operator directly. The retained singular values span at most a
+%TODO: is this calculation of the singular values bound correct?
+factor $1/\tau=250$, so $1/\tau$ bounds the noise amplification the truncation
+exists to limit.\\
+For the geometry above this keeps $11\,150$ of $16\,384$ directions. The numerical
+null space $\mathcal{N}(\mathbf{A}_{la})$, which is the space the Nullspace Network operates on, has
 dimension $16\,384-11\,150=5\,234$, roughly a third of image space. This is not a
 small correction channel but a substantial subspace, and every statement of
 Section \ref{sec:nsn} about what the Nullspace Network can and cannot repair
 refers to this splitting of $\mathbb{R}^{16\,384}$.\\
-Three implementation details are worth recording.\\
-%TODO: Why do we do it like this, cant we form the matrix?, calculate the dimensions, is it actually faster?
+Two implementation details are worth recording.\\
 First, the pseudoinverse is never stored by itself. Writing $\mathbf{U}_k,\Sigma_k,
 \mathbf{V}_k$ for the retained factors, the reconstruction is evaluated as the
 two matrix products
-$$\mathbf{A}^+\mathbf{y} \;=\; \mathbf{V}_k\,\Sigma_k^{-1}\mathbf{U}_k^{*}\mathbf{y},$$
-applied to a batch of measurement vectors. This costs $\mathcal{O}(k(m+n))$ per
-sample instead of the $\mathcal{O}(mn)$ of an explicit $n\times m$ matrix, and it
-never materialises an object of that size.\\
-Second, the null-space projector is computed from the \emph{retained} rather
-than the discarded singular vectors. Section \ref{sec:nsn} writes it as
-%TODO: Does that mean, that i need to adapt section \ref{sec:nsn}
-$\mathbf{P}_{\mathcal{N}(\mathbf{A})}=\mathbf{V}_r\mathbf{V}_r^{*}$ using the
-last $n-r$ columns of $\mathbf{V}$, but a truncated decomposition never computes
-those columns. The implementation therefore uses the complementary form
-$$\mathbf{P}_{\mathcal{N}(\mathbf{A})} \;=\; \mathbf{I}-\mathbf{V}_k\mathbf{V}_k^{*},$$
-which is the %TODO: What does that mean? same operator whenever the decomposition is complete?
-same operator whenever the decomposition is complete and is the
-only one available under truncation. It too is applied without forming an
+$$\mathbf{A}_{la}^+\mathbf{y} \;=\; \mathbf{V}_k\,\Sigma_k^{-1}\mathbf{U}_k^{*}\mathbf{y},$$
+applied to a batch of measurement vectors. 
+
+%The usual argument for keeping the
+%factors --- that $\mathcal{O}(k(m+n))$ beats the $\mathcal{O}(mn)$ of an explicit
+%$n\times m$ matrix --- does not actually apply at these dimensions. With
+%$m=21\,840$, $n=16\,384$ and $k=11\,150$ the factored form costs
+%$k(m+n)=4.3\cdot10^{8}$ multiply-accumulates per sample against
+%$mn=3.6\cdot10^{8}$ for the explicit matrix, and stores $1.7$\,GB of factors
+%against $1.4$\,GB: some $20\,\%$ worse on both counts, because $k$ is more than
+%two thirds of $n$ and we are nowhere near the low-rank regime that estimate
+%assumes. The factors are kept for a different reason. 
+
+We apply $\mathbf{A}_{la}^+$ like this, since we need the components for the projections onto null space and null space complement so additionally storing the full pseudoinverse is not necessary.
+%TODO: Do we actually need U_k or do we do the projections using id - V_k V_k^*?
+%further operators --- $\mathbf{U}_k$ for the projection onto
+%$\operatorname{range}(\mathbf{A}_{la})$, $\mathbf{V}_k$ for the null-space
+%projection and for the error decomposition --- and materialising each of those
+%densely would cost considerably more than the factors do.
+\\
+Second, the space the Nullspace Network acts in is the numerical null space of the truncated operator, the
+$5\,234$-dimensional space counted above, and the space every decomposition
+figure of Chapter 4 splits along. It too is applied without forming an
 $n\times n$ matrix. The error decomposition of Section \ref{sec:nsn} is computed
 the same way: the nullspace-complement component is
 $\mathbf{e}_{\mathcal{N}^\perp}=\mathbf{V}_k\mathbf{V}_k^{*}\mathbf{e}$ and the
@@ -396,89 +382,105 @@ Third, and decisively for this work, all of these operations are ordinary tensor
 products, so PyTorch differentiates them. The gradient of an attack loss with
 respect to the sinogram has to travel backwards through the initial
 reconstruction into the measurements, and it is only because the pseudoinverse
-is two matrix multiplications that this is possible at all. 
-%TODO: Adapt to matrix-free backend, do we really need it? 
-The matrix-free backend has to approximate the same object: there,
-$\mathbf{P}_{\mathcal{N}(\mathbf{A})}\mathbf{v}$ is obtained by solving
-$\mathbf{A}^{*}\mathbf{A}\mathbf{x}=\mathbf{A}^{*}\mathbf{v}$ with $50$
-conjugate-gradient steps and returning $\mathbf{v}-\mathbf{x}$.\\
-%TODO: Check implementation
-Finally, precision. The matrices and their decompositions are built and cached
+is two matrix multiplications that this is possible at all.\\
+Finally, precision. The matrix and its decomposition are built and cached
 in double precision, but at training and attack time they are cast to single
 precision and held densely, so that every application runs as a dense matrix
-product on the GPU. The sparse kernels are considerably slower for matrices of
+product on the GPU. 
+%TODO: Calculate acceleration? and maybe just implement them as single precision and dense from the start then?
+The sparse kernels are considerably slower for matrices of
 this density and their automatic differentiation support is still experimental.
+This matters during training and not only during the attacks: the Nullspace
+Network applies $\mathbf{P}_{\mathcal{N}(\mathbf{A})}$ on every forward pass, so
+it is a per-step cost of training rather than a one-off.
 
-\subsection{Data generation}
+\subsection{Data generation}\label{sec:data}
 The dataset consists of $5\,000$ phantoms, each containing a single random
 ellipse, generated with ODL's \texttt{ellipsoid\_phantom} on the image grid
-supplied by DIVAL's ellipse dataset. 
-%TODO: Check accuracy of previous sentence, maybe we can remove odl?
+supplied by DIVAL's ellipse dataset. ODL rasterises the ellipse, DIVAL supplies the discretised image space it is
+rasterised onto.
 Intensity, semi-axes, centre and rotation
 are drawn at random, with the semi-axes rejected until the ellipse has an area
 of at least $0.1$ and the centre and rotation rejected until the ellipse lies
 entirely inside the image. Restricting each image to one ellipse keeps the
 reconstruction problem simple enough that both architectures reach a small
-reconstruction error, 
-%TODO: is this really the reason?
-so that the differences which remain between them can be
-attributed to the architecture rather than to the difficulty of the task.\\
+%TODO: Why can a difference be attributed to architecture rather than difficulty of the task, just because we use one ellipse? that seems like a claim that is a little bit of a stretch 
+reconstruction error, so that the differences which remain between them can be
+attributed to the architecture rather than to the difficulty of the task. It
+also keeps the null-space component of an error visually interpretable, which a
+cluttered phantom would not.\\
 For every sample the pipeline performs four steps.
 \begin{enumerate}
     \item Draw the ground truth $\mathbf{x}^\dagger$.
-    \item Simulate the noise-free measurement $\mathbf{y}=\mathbf{A}\mathbf{x}^\dagger$.
-    \item Add noise. A standard normal tensor $\boldsymbol{\eta}$ is drawn on the
-    sinogram, restricted to the measured angles and rescaled so that the
-    perturbation has a prescribed \emph{relative} size,
-    %TODO: Maybe adapt implementation, such that noise is added before measurement? maybe more accurate representation of reality? also how is the noise concretely restricted?
+    \item Simulate the noise-free measurement $\mathbf{y}=\mathbf{A}_{la}\mathbf{x}^\dagger$.
+    \item Add noise. A standard normal tensor is drawn on the sinogram and
+    projected onto $\operatorname{range}(\mathbf{A}_{la})$, giving
+    $\boldsymbol{\eta}$; it is then rescaled so that the perturbation has a
+    prescribed \emph{relative} size,
+    %TODO: check noise implementation
     $$\mathbf{y}^\delta=\mathbf{y}+\sigma_\text{rel}
     \frac{\lVert\mathbf{y}\rVert_2}{\lVert\boldsymbol{\eta}\rVert_2}\boldsymbol{\eta},
     \qquad\text{so that}\qquad
     \lVert\mathbf{y}^\delta-\mathbf{y}\rVert_2=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2$$
     holds exactly and per sample, independently of how bright the phantom is.
     \item Compute the initial reconstruction
-    $\mathbf{x}_\text{init}=\mathbf{A}^+\mathbf{y}^\delta$ and store ground
+    $\mathbf{x}_\text{init}=\mathbf{A}_{la}^+\mathbf{y}^\delta$ and store ground
     truth, sinogram and initial reconstruction to disk.
 \end{enumerate}
-%TODO: I am not sure about the comliance of the following paragraph/whether this is the correct implementation
-Steps 2 and 4 deliberately use different operators. The measurement is simulated
-with an essentially untruncated operator ($\tau=10^{-15}$, all $16\,384$
-directions retained), while the reconstruction uses the truncated one
-($\tau=4\cdot10^{-3}$). The data are therefore not produced by the same
-truncated operator that the reconstruction inverts, which would flatter the
-reconstruction method by construction.\\
+%TODO: This paragraph is still a lot of work (lines 430 until 448 right now)
+The projection in step 3 is what the phrase ``restricted to the measured
+angles'' has to mean here. The mask $\mathbf{M}$ alone would leave the noise
+free to occupy directions of the measured rows that are not measurements of any
+image, and such a component would be invisible to $\mathbf{A}_{la}^+$ and would
+simply be discarded by step 4 --- the nominal noise level would then not be the
+noise level the reconstruction actually sees. Projecting instead onto
+$\operatorname{range}(\mathbf{A}_{la})$ makes every unit of the budget a unit the
+reconstruction has to cope with. Note also that the noise is added after the
+measurement rather than to the photon counts before it. Physically neither is
+faithful --- real CT noise is Poisson on counts, before the log transform --- but
+the post-measurement Gaussian is the standard idealisation of an inverse
+problem, and it is what makes the identity above hold exactly.\\
+Steps 3 and 4 deliberately use different operators. The noise is projected with
+an essentially untruncated operator ($\tau=10^{-15}$), while the reconstruction
+uses the truncated one ($\tau=4\cdot10^{-3}$). The noise is therefore not
+confined to the subspace the reconstruction inverts, which would flatter the
+reconstruction method by construction: some of it lands in the small-singular-value
+directions the truncation throws away, exactly as it would in a real scan.\\
 Alongside the data the pipeline writes a summary file recording the geometry,
 the angle vector, the limited-angle window, the noise level, the mean sinogram
 norm, the mean noise norm, the operator norm and the truncation threshold.
 Training and attacking both read their configuration from this file rather than
 from the command line, which guarantees that the operator used to attack a model
 is the operator that generated the data it was trained on.\\
-Four noise levels are used,
-%TODO: Should noise level be really here?
-$\sigma_\text{rel}\in\{0.005,\,0.01,\,0.02,\,0.05\}$, each with its own dataset,
+Four noise levels are used, $\sigma_\text{rel}\in\{0.005,\,0.01,\,0.02,\,0.05\}$, each with its own dataset,
 its own pair of trained models and its own attack run. The first $4\,000$
 samples form the training set and the following $1\,000$ the test set; the split
 is by index and therefore deterministic.
 
 \subsection{Residual UNet}
 To be able to describe the residual UNet, we first need to implement the UNet itself. We start the implementation of the UNet by defining a double convolution:
-%TODO: Adapt implementation
+%TODO: remove midchannels from codesnippet and actual code, we dont use it anywhere
 \begin{lstlisting}[language=Python, caption=DoubleConv]
 class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
+        mid_channels = mid_channels or out_channels
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+            nn.Conv2d(in_channels, mid_channels, 3, padding=1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.Conv2d(mid_channels, out_channels, 3, padding=1, bias=False),
             nn.ReLU(inplace=True),
         )
     def forward(self, x):
         return self.net(x)
 \end{lstlisting}
-This applies two convolutions, the first increases the number of channels, the second is a standard convolution, leaving the channel number unchanged. Kernel size is $3$, padding is $1$ and there is no bias in these convolutions.
+%TODO: modify this paragraph to reflect code changes
+This applies two convolutions, the first taking the channel count to
+$\texttt{mid\_channels}$ and the second to $\texttt{out\_channels}$. Left
+unspecified, $\texttt{mid\_channels}$ equals $\texttt{out\_channels}$, so the
+first convolution sets the channel count and the second leaves it unchanged;
+the expansive path below is the one place where it is set explicitly. Kernel size is $3$, padding is $1$ and there is no bias in these convolutions.
 Each convolution is followed by a ReLU activation function. The parameter $\texttt{inplace}=\texttt{true}$ has the activation function modify the input tensor instead of generating a new output tensor. This decreases memory requirements.
-%TODO: Is this implementation correct?
 We can then use this double convolution, to create a down and an upsampling module. The downsampling ($\texttt{Down}$) is just the MaxPooling operation mentioned earlier, followed by a double convolution. The upsampling ($\texttt{Up}$) is bilinear upsampling,%TODO: connect to section above maybe show code for up and down
 for our scale factor of $2$ this means we double the resolution. The parameter $\texttt{align\_corners}$ allows us to enforce, that the corner values remain unchanged. Bilinear upsampling is the counterpart of the max pooling of Section 1.3:%TODO: Connect to section above
 max pooling discards three of every four values, bilinear %TODO: explain bilinearity!
@@ -496,10 +498,10 @@ class UNet(nn.Module):
         self.down2 = Down(128, 256)
         self.down3 = Down(256, 512)
         self.down4 = Down(512, 512)
-        self.up1 = Up(1024, 256, True)
-        self.up2 = Up(512, 128, True)
-        self.up3 = Up(256, 64, True)
-        self.up4 = Up(128, 64, True)
+        self.up1 = Up(1024, 256)
+        self.up2 = Up(512, 128)
+        self.up3 = Up(256, 64)
+        self.up4 = Up(128, 64)
         self.outc = OutConv(64, 1)
 
     def forward(self, x):
@@ -514,12 +516,12 @@ class UNet(nn.Module):
         x = self.up4(x, x1)
         return self.outc(x)
 \end{lstlisting}
-%TODO: Check whether UP or Down really need as many arguments, check number of trainable parameters
-The third argument of $\texttt{Up}$ selects bilinear upsampling in preference to
-a transposed convolution. Four downsampling steps take a $128\times128$ input
+Four downsampling steps take a $128\times128$ input
 down to an $8\times8$ bottleneck carrying $512$ channels, and the expansive path
-returns it to the original resolution. In total the network has about $17.3$
-million trainable parameters, nearly all of them in the two innermost blocks.
+%TODO:describe calculation
+returns it to the original resolution. In total the network has $17\,252\,993$
+trainable parameters, about three fifths of them in the two innermost blocks
+$\texttt{down4}$ and $\texttt{up1}$ alone.
 This gives us an image to image neural network, that we can use in our residual and nullspace network architectures.
 The output of the residual network is then calculated as $\mathbf{x} + \texttt{UNet}(\mathbf{x})$,
 %TODO: Improve following sentence
@@ -533,22 +535,287 @@ def mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 Where the tensor $\texttt{pred}$ is the network reconstruction and $\texttt{target}$ is the ground truth. We use an $\texttt{torch.optim.Adam}$ optimizer on the model parameters to train each epoch. This works in pytorch by creating the optimizer $\texttt{torch.optim.Adam(model.parameters(), lr=0.0001)}$.
 Before each step we set the gradient to zero, recompute it with $\texttt{loss.backward()}$ and update the models parameters using the optimizer accordingly. We train for $50$ Epochs with a batch size of $32$,
 %TODO: learning rate schedulee and data augmentation, what is it? why would we use it?
-without a learning-rate schedule and without data augmentation.\\
-Each epoch is followed by an evaluation over the test set and whenever the validation loss improves, the weights are written
-to disk. 
-Two further artifacts are produced during training, both of them for the epoch study of 
-%TODO: Reference section correctly, understand how epoch study works 
-Section 3.6.3: a snapshot of the weights after \emph{every} epoch, and a history file recording
-the training and validation loss of each epoch together with the index of the
-best one. Since the two architectures differ only in the wrapper around the
-UNet, one training loop serves both.
-%TODO: Can we simplify epoch study? do we need the history file?
+without a learning-rate schedule and without data augmentation. Each epoch is followed by an evaluation over the test set and whenever the validation loss improves, the weights are written
+to disk. \\
+%TODO: maybe remove stride from implementation, i am not sure it is necessary, how much lines would we save if we remove it? 
+Two further artifacts are produced during training, both of them for the epoch
+study of Section \ref{sec:epoch}. Every $N$th epoch a snapshot of the weights, and a
+history file recording the training and validation loss of each epoch together
+with the index of the best one are saved. In our experiment, the stride $N$ is set to $1$ for best accuracy. Since one snapshot is $69$\,MB, $N=1$ costs $3.4$\,GB per
+model and noise level, so to provide better reproducibility, a stride is added. This reduction in storage requirement also translates to a reduction in attack time, since the epoch study attacks each snapshot.
+The history file costs a few kilobytes and is what lets the study plot attackability against the loss
+curves, so it is always written. Since the two architectures differ only in the
+wrapper around the UNet, one training loop serves both.
 
 \subsection{Nullspace Network}
-\subsection{Adversarial attacks}
+The Nullspace Network shares the UNet of the previous section exactly, the two
+architectures differ only in the application of the UNet correction.
+\begin{lstlisting}[language=Python, caption=The two wrappers]
+class RESNET(nn.Module):
+    def forward(self, x):
+        return x + self.unet(x)
+
+class NSN(nn.Module):
+    def forward(self, x):
+        return x + self.radon.proj_null_image(self.unet(x))
+\end{lstlisting}
+Here $\texttt{proj\_null\_image}$ is the operator
+$\mathbf{P}_{\mathcal{N}(\mathbf{A})}=\mathbf{I}-\mathbf{V}_k\mathbf{V}_k^{*}$ of
+%TODO: Improve section reference
+Section 3.2, so the second wrapper is exactly the reconstruction map
+$\mathbf{x}_\text{out}=\mathbf{x}_\text{init}+
+\mathbf{P}_{\mathcal{N}(\mathbf{A})}N_\theta(\mathbf{x}_\text{init})$ of Section
+\ref{sec:nsn}.\\
+The projection sits \emph{inside} the computational graph, not after it. 
+%TODO: What does this is a stonger statment than the ouput is projected mean? did i mention this earlier in section 1.4?
+This is a stronger statement than saying that the output is projected.
+%TODO: Why is self adjoint ipmlying that the gradient reaching the unet during training look like this?
+Since $\mathbf{P}_{\mathcal{N}(\mathbf{A})}$ is self-adjoint, the gradient that reaches the UNet during training is
+$\mathbf{P}_{\mathcal{N}(\mathbf{A})}\nabla_{\!N_\theta}\mathcal{L}$: any
+component of the network output lying in $\mathcal{N}(\mathbf{A})^\perp$
+produces no gradient signal whatsoever.
+%TODO: Weird sentence
+The network is thus not merely constrained after the fact, it is trained only on the subspace it is permitted to act in.\\
+%TODO: Check, that all properties are checked
+That the implementation actually realises the properties claimed in Section
+\ref{sec:nsn} is checked numerically: the test suite verifies that $\mathbf{P}_{\mathcal{N}(\mathbf{A})}$ is idempotent, that
+$\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})}=0$ to machine precision, that
+the error decomposition is orthogonal, and that the correction produced by a
+trained Nullspace Network lies in $\mathcal{N}(\mathbf{A})$.
+
+\subsection{Adversarial attacks}\label{sec:adversarial}
+In the attack implementation we used, we differentiate the whole chain from the sinogram to
+the reconstruction,
+$$\mathbf{y}\;\longmapsto\;\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}\mathbf{y}
+\;\longmapsto\;\mathbf{x}_\text{init}=\mathbf{A}_{la}^+\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}\mathbf{y}
+\;\longmapsto\;\mathcal{F}_\theta(\mathbf{y}),$$
+where $\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}=\mathbf{U}_k\mathbf{U}_k^{*}$
+is the orthogonal projector onto the retained range of the limited-angle
+operator. It is emphatically \emph{not} the mask $\mathbf{M}$ of the convention
+above.
+Separating the initial reconstruction from the network in the
+code means that the same attack implementation drives both architectures with
+no branching inside the attack itself.\\
+%TODO: Check following paragraph until budget
+The first arrow also applies to the clean sinogram before the attack begins:
+what is attacked is $\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}\mathbf{y}^\delta$
+rather than the $\mathbf{y}^\delta$ that was written to disk. This changes
+nothing about the network input, because
+$\mathbf{A}_{la}^+=\mathbf{V}_k\Sigma_k^{-1}\mathbf{U}_k^{*}$ annihilates exactly
+the component the projection removes, so
+$\mathbf{A}_{la}^+\mathbf{y}^\delta=\mathbf{A}_{la}^+
+\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}\mathbf{y}^\delta$ identically;
+it matters only in that the reported perturbation is measured against the
+projected sinogram.\\\\
+\textbf{Budget.} The budget is relative and per sample:
+$\varepsilon_i=\varepsilon\lVert\mathbf{y}_i\rVert_2$, so a bright and
+a faint sinogram are attacked at the same relative strength. Unless stated
+otherwise $\varepsilon$ is set to the noise level
+%TODO: Define sigma earlier in this work?
+$\sigma$ of the dataset the model was trained on. The attacker is granted exactly as much energy as the
+measurement noise the model has already learned to tolerate. A perturbation that
+does real damage within that budget is a perturbation indistinguishable in size
+from noise the scanner produces anyway.\\\\
+%TODO: check stepsize, is it accurate?
+\textbf{Step size and restarts.} The step size is
+$\alpha = 2.5\,\varepsilon\bar{y}/T$ with $T=50$ iterations and
+$\bar y$ the mean sinogram norm of the dataset, that is, the $2.5\varepsilon/T$
+%TODO: Check paper reference
+rule of Madry et al.\ \parencite{PGD} expressed in absolute units. Each attack is
+run from $2$ independent random starting points and the run achieving the higher
+objective is kept.\\\\
+\textbf{Feasible set.} Writing $\mathbf{P}$ for
+$\mathbf{P}_{\operatorname{range}(\mathbf{A}_{la})}$, the projection $\Pi_S$ of
+Section \ref{sec:attacks} is implemented as
+$$\Pi_S(\boldsymbol{\delta})=\mathbf{P}\,
+\Pi_{B_\varepsilon}\!\left(\mathbf{P}\boldsymbol{\delta}\right),
+\qquad
+\Pi_{B_\varepsilon}(\mathbf{v})=\mathbf{v}\cdot
+\min\!\left(1,\frac{\varepsilon}{\lVert\mathbf{v}\rVert_2}\right),$$
+%TODO: What is ball projection applied per sample? isnt that the obvious way?
+with the ball projection applied per sample. The outer $\mathbf{P}$ restores
+feasibility after the radial shrink,
+%TODO: Is rounding truly the reason, isnt it that the projection might leave the subspace range(A)
+which otherwise leaves the iterate only
+approximately in the subspace after repeated floating-point rounding.\\
+The feasible set $S$ for our attacks is defined in the following way: $S:=\operatorname{range}(\mathbf{A}_{la})\cap B_\varepsilon$.\\
+%TODO: Investigate following section and why the set of measurement noise is different?
+The simulated measurement noise of Section \ref{sec:radon} is drawn from the same kind of
+set but not from the identical one: it is projected at $\tau=10^{-15}$ and so
+occupies $\operatorname{range}(\mathbf{A}_{la})$ in full, whereas the attack is
+projected at $\tau=4\cdot10^{-3}$ and occupies the retained part of it. The
+attack budget is thus spent in a strict subspace of the space the noise lives
+in, which is if anything a handicap for the attacker and does not flatter the
+robustness results.\\
+%TODO: CHECK code and improve reference
+With these pieces the iteration of Section \ref{sec:attacks} is nine lines of code.
+\begin{lstlisting}[language=Python, caption=The PGD loop]
+for _ in range(SUITE_RESTARTS):
+    delta = project_delta(proj_l2_ball(torch.randn_like(y_clean), eps),
+                          eps, adapter.projector)
+    for _ in range(SUITE_STEPS):
+        y_adv = (y_clean + delta).detach().requires_grad_(True)
+        pred, _, _ = adapter.forward(y_adv, project=False)
+        grad = torch.autograd.grad(loss_of(pred), y_adv)[0]
+        with torch.no_grad():
+            g = grad / l2_norm_batch(grad).clamp_min(1e-12).view(-1, 1, 1, 1)
+            delta = project_delta(delta + alpha * g, eps, adapter.projector)
+\end{lstlisting}
+%TODO: Is the following sentence required
+The gradient is taken with respect to the perturbed sinogram rather than the
+perturbation, which is the same thing since the two differ by the constant
+$\mathbf{y}$. Note that the step is \emph{added}, so that the loss is maximised,
+and that the gradient is normalised in the $\ell_2$ norm before the step,
+%TODO: gradient normalised? abocve? and improve section reference
+exactly as derived in Section 2.1. The model is held in evaluation mode
+throughout and gradients are requested only with respect to the input, so no
+weight is ever modified by an attack.\\
+Five attacks are run over every model, differing only in the loss that
+$\texttt{loss\_of}$ evaluates: the untargeted attack on the total error, the two
+subspace attacks of the next section, and the two targeted attacks of the one
+after that.
 \subsubsection{Targeted Adversarial Attacks on Subspaces}
+%TODO: Improve section reference and check code compliance
+The two subspace losses of Section \ref{sec:attacks} are direct transcriptions of their
+definitions.
+\begin{lstlisting}[language=Python, caption=The subspace objectives]
+if objective == "null":
+    err = pred - x_gt
+    return reduce_loss(radon.proj_null_image(err) ** 2)
+
+if objective == "range":
+    err = pred - x_gt
+    return reduce_loss((err - radon.proj_null_image(err)) ** 2)
+\end{lstlisting}
+Up to the constant factor by which a mean differs from a squared norm, the first is $\mathcal{L}_\mathcal{N}$ and the second
+$\mathcal{L}_{\mathcal{N}^\perp}$. The constant factor of course does not affect the direction of the gradient.
+Both use the same projector as the Nullspace Network itself.
+%TODO: Check truth of this sentence.
+For an attack on the Nullspace Network the projection therefore occurs twice in the
+graph --- once inside the model and once inside the loss --- and is
+differentiated both times.
+Applying it costs two matrix products of $\mathbf{V}_k$ against the batch, or
+%TODO: what is k, what is n
+$2kn\approx3.7\cdot10^{8}$ multiply-accumulates per sample, and the attack pays
+that four times per step --- twice in the forward pass and twice again in the
+backward pass --- for $50$ iterations and $2$ restarts on every sample. These calculations remain
+affordable since the matrix products are dense single-precision products on the GPU.
+%TODO: Explain, what sparse double precision products cost in comparison 
 \subsubsection{Targeted Adversarial Attacks using Examples}
+%TODO: Improve reference, why detach in the code?
+The two targeted losses of Section 2.1.2 are negated squared distances, so that
+maximising them moves the reconstruction towards the target.
+\begin{lstlisting}[language=Python, caption=The targeted objectives]
+if objective == "zero":
+    return -reduce_loss(pred ** 2)
+
+if objective == "target":
+    return -reduce_loss((pred - target.detach()) ** 2)
+\end{lstlisting}
+The first realises $\mathbf{t}=0$.
+%TODO: target image per batch?
+The second needs a target image supplied per batch,
+and the choice made here is the ground truth of a \emph{different} sample
+of the same batch.
+%TODO: Make sentence less complicated
+The assignment of targets to samples is drawn as a
+derangement, that is, a random permutation of the batch indices that is rejected
+and redrawn until it has no fixed point, with a cyclic shift as a guaranteed
+fallback. This ensures that no sample is ever steered towards its own ground
+truth, which would silently turn the targeted attack into no attack at all.
+%TODO: How is this done?
+The target is detached from the graph, since it is a fixed reference and not
+something the attack may optimise.
 \subsubsection{Epoch study}
+The epoch study investigates, whether there is a specific time during training, when a model becomes attackable.
+This is helpful to decide, whether attackability coincides with the onset of
+overfitting. It consumes the epoch
+snapshots written by the training loop of Section \ref{sec:epoch}. For each architecture,
+every snapshot is loaded in turn, attacked with the untargeted
+squared-error objective at a fixed budget of
+$\varepsilon_\text{rel}=0.01$, and evaluated. The resulting adversarial error is
+recorded in the history filenext to the training and validation loss of the same epoch.
+Because the study repeats a full attack once per snapshot, it runs on $32$
+test samples rather than the $128$ used for the other attacks.\\
+%TODO: What does the following sentence mean?
+Every epoch of a model is attacked on the same cached inputs, so the only
+quantity varying along the resulting curve is the weights.
+
+\subsection{Metrics and error decomposition}
+%TODO: reformulate sentence? battery is weird, explain each error and what it does!!!
+Every attacked sample is scored with the same battery of metrics, computed
+between the reconstruction and the ground truth: the relative $\ell_2$ error,
+PSNR, SSIM, mean absolute error, root-mean-square error, its variant normalised
+by the data range, and the maximum absolute pixel error. They are recorded for
+the clean and for the adversarial reconstruction, and separately for the initial
+reconstruction, so that the damage the attack does to the network input can be
+told apart from the damage it does to the output. 
+%TODO: What is s? do we need confidence intervals?
+Aggregation reports the mean with a $95\%$ confidence interval of half-width $1.96\,s/\sqrt{N}$, together with
+the median and the quartiles, the latter because a handful of samples on which
+an attack succeeds unusually well would otherwise dominate the mean.\\
+%TODO: reference section correctly
+In addition, every error field is decomposed as in Section 3.2 into
+$\mathbf{e}_\mathcal{N}$ and $\mathbf{e}_{\mathcal{N}^\perp}$, and the norms of
+both components as well as their fractions of $\lVert\mathbf{e}\rVert$ are
+recorded. Since only the squared $\ell_2$ norm is additive over this
+decomposition, the remaining metrics cannot be split the same way.
+%TODO: Investigate following design decision
+Instead the component-only images $\mathbf{x}^\dagger+\mathbf{e}_{\mathcal{N}^\perp}$ and
+$\mathbf{x}^\dagger+\mathbf{e}_\mathcal{N}$ are scored with the same metrics,
+which shows how much of the loss in, say, SSIM each subspace is responsible for
+on its own.\\
+%TODO: Is data consistency implemented correctly and why?, also following sentences!
+Data consistency is measured as the relative residual on the measured angles,
+$$\frac{\lVert\mathbf{P}_\text{meas}\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}\rVert_2}
+{\lVert\mathbf{y}\rVert_2}.$$
+Two versions of this number are recorded and they mean quite different things.
+Evaluated against the \emph{attacked} sinogram, the Nullspace Network drives it
+to about $10^{-8}$ whatever the attack does --- that is the guarantee of Section
+\ref{sec:nsn} restated, a tautology rather than a robustness result. Evaluated
+against the \emph{clean} sinogram it reports how far the
+attack has pushed the reconstruction away from the measurements actually taken and it is this version that carries information.\\
+%TODO: CHeck attack-independent robustness measure
+Finally, an attack-independent robustness measure is computed. Let
+$g(\mathbf{x})=\mathcal{F}_\theta(\mathbf{x})-\mathbf{x}$ denote the learned
+correction. Linearising $g$ around the clean initial reconstruction and
+restricting both its input and its output to $\mathcal{N}(\mathbf{A})$ with the
+same projector gives the operator
+$\mathbf{M}=\mathbf{P}_{\mathcal{N}(\mathbf{A})}\,
+\mathbf{J}_g\,\mathbf{P}_{\mathcal{N}(\mathbf{A})}$, whose largest singular value
+is estimated by power iteration using PyTorch's Jacobian-vector and
+vector-Jacobian products, so that the Jacobian is never assembled. This number
+tells us how strongly a null-space perturbation of the input can be amplified into
+null-space error at the output.
+%TODO: Lipschitz estimate also listing, explain difference in detail
+Because both architectures are measured on the
+same subspace, it is comparable between them in a way a plain Lipschitz estimate
+would not be.
+
+\subsection{Experimental pipeline}
+%TODO: This whole section is still a draft, as the pipeline can still change in the next few days
+Computation and rendering are kept strictly apart. An attack run writes only
+numeric artifacts: the per-sample metrics as a table, the adversarial sinograms
+and perturbations, the example images with their per-sample metrics, the
+cross-model transfer stacks and the aggregated summary. Every figure in Chapter
+4 is produced afterwards from those files alone, without a model, a checkpoint or
+a Radon operator being loaded. A figure can therefore be redrawn at any time
+without repeating the attack that produced it, which matters because a full
+attack run takes several GPU-hours.\\
+The four noise levels are processed by a Slurm pipeline in four stages: data
+generation and training, then the attack suite and the epoch study, which depend
+only on the first stage and therefore run concurrently, then the rendering,
+which waits for both. This brings the critical path down from roughly $141$
+hours of serial computation to about $24$.\\
+Reproducibility rests on three things. The random seeds are fixed, both for data
+generation and for the attacks. All models within a run are attacked on a cached
+set of inputs, so that they see identical data and any difference between them is
+a difference of architecture. And the operator identities the argument of this
+thesis depends on --- the idempotence of the null-space projector,
+$\mathbf{A}_{la}\mathbf{P}_{\mathcal{N}(\mathbf{A})}=0$, the agreement of the
+truncated factors with the sparse system matrix, the orthogonality of the
+error decomposition and the enforcement of the attack budget --- are covered by a
+test suite that exercises them against the real operator rather than a mock.
 
 \section{Results}
 \subsection{Model performance}

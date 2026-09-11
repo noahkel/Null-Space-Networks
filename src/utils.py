@@ -4,7 +4,7 @@ from pathlib import Path
 from src.unet import UNet
 from src.wrappers import RESNET, NSN
 from typing import List, Union, Dict, Optional
-from src.radon import _RadonBase
+from src.radon import MatrixRadonAdapter
 
 import torch.nn as nn
 import math
@@ -106,9 +106,7 @@ def mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def decompose_error(
     e: torch.Tensor,
-    radon: "_RadonBase",
-    iters: int = 50,
-    tol: float = 1e-6,
+    radon: "MatrixRadonAdapter",
 ) -> tuple:
     """
     Orthogonal decomposition of image-space error e:
@@ -118,24 +116,23 @@ def decompose_error(
     The two are orthogonal, so the energy splits exactly:
       ||e||_2^2 = ||e_ran||_2^2 + ||e_nul||_2^2.
 
-    Delegates to radon.decompose_error: MatrixRadonAdapter uses exact SVD,
-    other adapters use CG.  Returns (e_ran, e_nul) as detached CPU tensors.
+    Returns (e_ran, e_nul) as detached CPU tensors.
     """
-    e_ran, e_nul = radon.decompose_error(e, iters=iters, tol=tol)
+    e_ran, e_nul = radon.decompose_error(e)
     return e_ran.detach().cpu(), e_nul.detach().cpu()
 
 
 def build_models(
     which: List[str],
-    radon: _RadonBase,
+    radon: MatrixRadonAdapter,
 ) -> Dict[str, nn.Module]:
     models: Dict[str, nn.Module] = {}
     for name in which:
         name = name.lower()
         if name == "resnet":
-            models[name] = RESNET(unet=UNet(in_channels=1, out_channels=1))
+            models[name] = RESNET(unet=UNet())
         elif name == "nsn":
-            models[name] = NSN(unet=UNet(in_channels=1, out_channels=1), radon=radon)
+            models[name] = NSN(unet=UNet(), radon=radon)
         else:
             raise ValueError(
                 f"Unknown model '{name}'. Use one of: resnet, nsn")

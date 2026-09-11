@@ -6,8 +6,6 @@
 #   bash pipeline.sh --only render      submit a subset of the stages
 #   bash pipeline.sh --serial           submit one long serial job instead
 #
-#   PINV_MODE=unthresholded bash pipeline.sh   # unthresholded pinv init
-#   MATRIX_MODE=0 bash pipeline.sh             # astra backend instead of matrix
 #   CREATE_DATA=0 TRAIN=0 bash pipeline.sh     # reuse existing data + models
 #   EPS="0.005 0.01 0.02" bash pipeline.sh     # a different noise sweep
 #
@@ -71,14 +69,10 @@ cd "$REPO_DIR" || exit 1
 CREATE_SCRIPT=create_data.py
 
 # ── Radon backend ────────────────────────────────────────────────────────────
-# 1 = MatrixRadonAdapter: explicit A_la matrix with a truncated-SVD pseudoinverse.
-#     The backend every current result uses, and the only one with a pinv init.
-# 0 = AstraRadonAdapter. No SVD truncation, so PINV_MODE does not apply and the
-#     data carries an fbp init instead; attack.py detects whichever of the two
-#     exists.
-MATRIX_MODE=${MATRIX_MODE:-1}
-MATRIX_SUFFIX=""
-[ "$MATRIX_MODE" -eq 1 ] && MATRIX_SUFFIX="_matrices"
+# One backend: MatrixRadonAdapter, the explicit A_la matrix with a truncated-SVD
+# pseudoinverse. The suffix is kept so the default paths still point at the
+# trees that already exist.
+MATRIX_SUFFIX="_matrices"
 
 # ── Geometry / dataset ───────────────────────────────────────────────────────
 IMG_SIZE=${IMG_SIZE:-128}          # pixels
@@ -86,30 +80,14 @@ MIN_ANGLE=${MIN_ANGLE:-0}
 MAX_ANGLE=${MAX_ANGLE:-120}        # limited angle
 NUM_THETAS=${NUM_THETAS:-180}
 N_SAMPLES=${N_SAMPLES:-5000}
-TYPE=${TYPE:-ellipses}             # dataloader
 MODELS=${MODELS:-resnet,nsn}
 
 # Noise levels. One data set + one model set + one attack run per level.
 EPS=${EPS:-"0.005 0.01 0.02 0.05"}
 
-# ── pinv initialisation operator ─────────────────────────────────────────────
-# "thresholded"   = truncated-SVD A_la^+ (the baseline every result so far uses)
-# "unthresholded" = full A_la^+, keeps the tiny singular values
-# The pinv init is baked into the *data*, so a switch means regenerating the
-# dataset; the tag below keeps the two variants in separate trees. Meaningless
-# under MATRIX_MODE=0 (astra has no SVD to truncate), so it earns no tag there.
-PINV_MODE=${PINV_MODE:-thresholded}
-PINV_TAG=""
-if [ "$MATRIX_MODE" -eq 1 ] && [ "$PINV_MODE" != "thresholded" ]; then
-    PINV_TAG="_${PINV_MODE}"
-fi
-# Training minimises L2/MSE and there is no configurable objective, so the pinv
-# variant is the only thing left that namespaces an output tree.
-VARIANT_TAG="${PINV_TAG}"
-
 # Path scheme, chosen so the defaults reproduce the trees that already exist:
-DATA_BASE=${DATA_BASE:-/scratch/noah/data${MATRIX_SUFFIX}${PINV_TAG}}
-MODEL_BASE=${MODEL_BASE:-/scratch/noah/models${MATRIX_SUFFIX}${VARIANT_TAG}}
+DATA_BASE=${DATA_BASE:-/scratch/noah/data${MATRIX_SUFFIX}}
+MODEL_BASE=${MODEL_BASE:-/scratch/noah/models${MATRIX_SUFFIX}}
 
 # ── Attack budgets ───────────────────────────────────────────────────────────
 # eps is scaled per sample by ||y_i|| inside attack.py and --suite-eps defaults
@@ -117,9 +95,10 @@ MODEL_BASE=${MODEL_BASE:-/scratch/noah/models${MATRIX_SUFFIX}${VARIANT_TAG}}
 # eps is passed explicitly.
 MAX_SAMPLES=${MAX_SAMPLES:-128}        # test samples for the headline numbers
 EPOCH_STUDY_MAX=${EPOCH_STUDY_MAX:-32} # smaller budget for the per-epoch study
-# The study is scoped to one init. Astra data has no pinv folder, so the default
-# follows the backend rather than being a constant that silently mismatches.
-EPOCH_STUDY_INIT=${EPOCH_STUDY_INIT:-$([ "$MATRIX_MODE" -eq 1 ] && echo pinv || echo fbp)}
+# Epochs snapshotted during training and therefore attackable by the study.
+# 1 = every epoch (~69 MB x 50 x model); 5 keeps the curve shape at a fifth of
+# the storage and a fifth of the study runtime.
+CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-1}
 
 # Attack-free Lipschitz estimate, computed alongside the suite. Job 20585 ran it
 # at the n=4 default, which is thin for a headline "NSN < 1 < ResNet" claim.
@@ -156,7 +135,7 @@ MAX_CONCURRENT=${MAX_CONCURRENT:-2}
 
 # The trailing _l2 is historical — the suite is L2-only now — but it is what the
 # existing result trees are called, so a re-run lands in the same directory.
-out_dir_for()   { echo "attacks_n${1}${VARIANT_TAG}_l2"; }
+out_dir_for()   { echo "attacks_n${1}_l2"; }
 data_dir_for()  { echo "$DATA_BASE/$1"; }
 model_dir_for() { echo "$MODEL_BASE/$1"; }
 
@@ -300,22 +279,20 @@ finish() {
 #    byte-identical commands.
 # =========================================================================== #
 create_data() {
-    # --pinv_mode is accepted and ignored under --matrix_mode 0 (astra has no
-    # SVD to truncate), so it can be passed unconditionally.
     python -u "$CREATE_SCRIPT" --img_size $IMG_SIZE --noise $NOISE \
         --min_angle $MIN_ANGLE --max_angle $MAX_ANGLE --num_thetas $NUM_THETAS \
-        --n_samples $N_SAMPLES --matrix_mode $MATRIX_MODE --pinv_mode $PINV_MODE \
+        --n_samples $N_SAMPLES \
         --out_dir $DATA_BASE
 }
 
 train_models() {
-    python -u train.py --type $TYPE --out_dir $MODEL_DIR_NOISE \
+    python -u train.py --out_dir $MODEL_DIR_NOISE \
         --data_dir $DATA_DIR_NOISE --models $MODELS \
-        --checkpoint-every-epoch
+        --checkpoint-every $CHECKPOINT_EVERY
 }
 
-# One suite run = every model x every attack (total/null/range/targeted) x every
-# detected init, on one shared sample set. Splitting those into separate jobs
+# One suite run = every model x every attack (total/null/range/targeted), on one
+# shared sample set. Splitting those into separate jobs
 # would be both slower and less fair — they must share identical samples to be
 # compared. The attack-free Lipschitz estimate rides along with it.
 attack_suite() {
@@ -325,13 +302,13 @@ attack_suite() {
         --out-dir "$OUT_DIR"
 }
 
-# Scoped to one init and a smaller sample budget. Writes epoch_study/*.csv into
+# Runs at a smaller sample budget. Writes epoch_study/*.csv into
 # the same run dir as the suite so visualise.py renders the curves alongside the
 # suite figures. $MODEL restricts it to one architecture (one array task each);
 # empty means every model, which is what the serial path does.
 epoch_study() {
-    echo "=== [epoch-study] noise=$NOISE init=$EPOCH_STUDY_INIT model=${MODEL:-<all>} at $(date) ==="
-    python -u attack.py --epoch-study --init $EPOCH_STUDY_INIT \
+    echo "=== [epoch-study] noise=$NOISE model=${MODEL:-<all>} at $(date) ==="
+    python -u attack.py --epoch-study \
         ${MODEL:+--models "$MODEL"} \
         --data-root $DATA_DIR_NOISE --model-dir $MODEL_DIR_NOISE \
         --max-samples $EPOCH_STUDY_MAX --out-dir "$OUT_DIR"
@@ -380,7 +357,6 @@ run_worker() {
     setup_env
 
     echo "[config] stage=$STAGE task=${SLURM_ARRAY_TASK_ID:-<none>}"
-    echo "[config] matrix_mode=$MATRIX_MODE pinv_mode=$PINV_MODE variant_tag='${VARIANT_TAG}'"
 
     [ "$STAGE" = "all" ] && { run_serial; return; }
 
@@ -532,10 +508,8 @@ run_submitter() {
     echo "  repo         $REPO_DIR"
     echo "  commit       $(git rev-parse --short HEAD 2>/dev/null || echo '?')$(
             test -n "$(git status --porcelain 2>/dev/null)" && echo ' (DIRTY)')"
-    echo "  generator    $CREATE_SCRIPT, loader $TYPE"
-    echo "  backend      matrix_mode=$MATRIX_MODE $(if [ "$MATRIX_MODE" -eq 1 ]; then echo '(matrix + truncated-SVD pinv)'; else echo '(astra, no pinv init)'; fi)"
-    echo "  pinv_mode    $PINV_MODE$(if [ "$MATRIX_MODE" -eq 0 ]; then echo '  (n/a for astra)'; fi)"
-    echo "  variant tag  '${VARIANT_TAG:-<baseline>}'"
+    echo "  generator    $CREATE_SCRIPT"
+    echo "  backend      matrix + truncated-SVD pinv init"
     echo "  data         $DATA_BASE"
     echo "  models       $MODEL_BASE"
     echo "  noise levels $EPS"
@@ -589,8 +563,7 @@ run_submitter() {
 
     # Every knob the worker reads is exported, so the array tasks see exactly
     # the configuration printed above rather than re-deriving defaults.
-    local exports="ALL,REPO_DIR=$REPO_DIR,MATRIX_MODE=$MATRIX_MODE"
-    exports="$exports,PINV_MODE=$PINV_MODE,EPS=$EPS"
+    local exports="ALL,REPO_DIR=$REPO_DIR,EPS=$EPS"
     exports="$exports,CREATE_DATA=$CREATE_DATA,TRAIN=$TRAIN,RUN_EPOCH_STUDY=$RUN_EPOCH_STUDY"
     exports="$exports,MAX_SAMPLES=$MAX_SAMPLES,EPOCH_STUDY_MAX=$EPOCH_STUDY_MAX"
 
@@ -598,7 +571,7 @@ run_submitter() {
         # No array, so %A/%a would render as the NO_VAL sentinel — give the log
         # the plain job-id pattern instead.
         local jid
-        jid=$(sbatch --parsable --job-name="nsn-serial${VARIANT_TAG}" \
+        jid=$(sbatch --parsable --job-name="nsn-serial" \
                      --time="$SERIAL_TIME" --mail-type=BEGIN,END,FAIL \
                      --output="logs/%x_%j.out" --error="logs/%x_%j.err" \
                      --export="$exports,STAGE=all" "$REPO_DIR/pipeline.sh")
@@ -627,19 +600,19 @@ run_submitter() {
 
     local prep_id="" attack_id="" epoch_id="" render_id="" deps="" d
     if will_submit prep; then
-        prep_id=$(submit "nsn-prep${VARIANT_TAG}" "$n_prep" "$PREP_TIME" prep)
+        prep_id=$(submit "nsn-prep" "$n_prep" "$PREP_TIME" prep)
         echo "submitted prep    job $prep_id  ($n_prep tasks)"
     else
         echo "skipping prep — reusing existing data and models"
     fi
 
     if will_submit attack; then
-        attack_id=$(submit "nsn-attack${VARIANT_TAG}" "$n_attack" "$ATTACK_TIME" attack "$prep_id")
+        attack_id=$(submit "nsn-attack" "$n_attack" "$ATTACK_TIME" attack "$prep_id")
         echo "submitted attack  job $attack_id  ($n_attack tasks)${prep_id:+  after $prep_id}"
     fi
 
     if will_submit epoch; then
-        epoch_id=$(submit "nsn-epoch${VARIANT_TAG}" "$n_epoch" "$EPOCH_TIME" epoch "$prep_id")
+        epoch_id=$(submit "nsn-epoch" "$n_epoch" "$EPOCH_TIME" epoch "$prep_id")
         echo "submitted epoch   job $epoch_id  ($n_epoch tasks)${prep_id:+  after $prep_id}"
     fi
 
@@ -647,7 +620,7 @@ run_submitter() {
     # sets of figures are included. With --only render there is nothing to wait
     # for and it starts straight away against what is on disk.
     if will_submit render; then
-        render_id=$(submit "nsn-render${VARIANT_TAG}" "$n_render" "$RENDER_TIME" \
+        render_id=$(submit "nsn-render" "$n_render" "$RENDER_TIME" \
                            render "$attack_id" "$epoch_id")
         for d in "$attack_id" "$epoch_id"; do
             [ -n "$d" ] && deps="${deps:+$deps + }$d"
