@@ -115,10 +115,10 @@ def suite_eps_batch(y_clean: torch.Tensor, eps_nominal: float) -> torch.Tensor:
     sinogram are attacked at the same *relative* strength."""
     return eps_nominal * l2_norm_batch(y_clean)
 
-def suite_step_size(eps_nominal: float, mean_sino_norm: float, steps: int) -> float:
-    """Default PGD step alpha for a suite run: the classic 2.5*eps/steps, in the
-    same units as the budget."""
-    return 2.5 * eps_nominal * max(mean_sino_norm, 1.0) / max(steps, 1)
+def suite_step_size(eps: Budget, steps: int = SUITE_STEPS) -> Budget:
+    """PGD step alpha: the classic 2.5*eps/steps, in the same units as the
+    budget. Since the budget is per sample, so is the step."""
+    return 2.5 * eps / max(steps, 1)
 
 def reduce_loss(loss_map: torch.Tensor) -> torch.Tensor:
     if loss_map.ndim <= 1:
@@ -244,7 +244,7 @@ def pgd_attack(
     y_clean: torch.Tensor,
     clean_pred: torch.Tensor,
     eps: Budget,
-    alpha: float,
+    alpha: Budget,
     objective: str,
     target: Optional[torch.Tensor] = None,
 ) -> AttackResult:
@@ -267,6 +267,7 @@ def pgd_attack(
     """
     start = time.perf_counter()
     radon = adapter.radon
+    alpha_b = as_eps_batch(alpha, y_clean)
     best_y_adv = y_clean.detach().clone()
     best_delta = torch.zeros_like(y_clean)
     best_score = -float("inf")
@@ -283,7 +284,8 @@ def pgd_attack(
             pred, _, _ = adapter.forward(y_adv, project=False)
             grad = torch.autograd.grad(loss_of(pred), y_adv)[0]
             with torch.no_grad():
-                delta = project_delta(delta + alpha * grad / l2_norm_batch(grad).clamp_min(1e-12).view(-1, 1, 1, 1), eps, adapter.projector)
+                g = grad / l2_norm_batch(grad).clamp_min(1e-12).view(-1, 1, 1, 1)
+                delta = project_delta(delta + alpha_b * g, eps, adapter.projector)
 
         with torch.no_grad():
             y_adv = y_clean + delta
@@ -760,7 +762,6 @@ class RunSetup:
     summary: Dict
     radon: object
     noise_rel: float
-    mean_sino_norm: float
     out_root: Path
 
 def prepare_run(args) -> RunSetup:
@@ -778,7 +779,6 @@ def prepare_run(args) -> RunSetup:
         summary=summary,
         radon=build_radon(summary, device=device, dtype=torch.float64 if F64 else torch.float32, dense=not SPARSE),
         noise_rel=noise_rel,
-        mean_sino_norm=float(summary.get("mean_norm_y") or 0.0),
         out_root=Path(args.out_dir or f"attacks_n{noise_rel}"),
     )
 
@@ -875,7 +875,7 @@ def _stack_chunks(chunks: List[torch.Tensor]) -> np.ndarray:
 
 def run_suite(args, radon, summary: Dict,
               noise_rel: float, eps_nominal: float,
-              attacks_root: Path, alpha: float) -> bool:
+              attacks_root: Path) -> bool:
     """Run the five-attack suite and write every artifact to disk. Returns False
     (and skips) when no model checkpoints exist.
 
@@ -934,7 +934,8 @@ def run_suite(args, radon, summary: Dict,
                           if attack_name in _SUITE_TARGETED_ATTACKS else None)
                 result = pgd_attack(
                     adapter=adapter, x_gt=x_gt, y_clean=y_clean,
-                    clean_pred=clean_pred, eps=eps_batch, alpha=alpha,
+                    clean_pred=clean_pred, eps=eps_batch,
+                    alpha=suite_step_size(eps_batch),
                     objective=objective,
                     target=target)
                 with torch.no_grad():
@@ -1237,7 +1238,6 @@ def run_epoch_study(args) -> None:
     study_dir = out_root / "epoch_study"
     study_dir.mkdir(parents=True, exist_ok=True)
 
-    suite_alpha = suite_step_size(eps_nominal, setup.mean_sino_norm, SUITE_STEPS)
     # Optional model subset, so one array task can own one model. Each task writes
     # its own epoch_study/{init}_{model}.csv, so they never collide.
     model_filter = ([m.strip() for m in args.models.split(",") if m.strip()]
@@ -1275,7 +1275,8 @@ def run_epoch_study(args) -> None:
                 eps_batch = suite_eps_batch(y_clean, eps_nominal)
                 result = pgd_attack(
                     adapter=adapter, x_gt=x_gt, y_clean=y_clean,
-                    clean_pred=clean_pred, eps=eps_batch, alpha=suite_alpha,
+                    clean_pred=clean_pred, eps=eps_batch,
+                    alpha=suite_step_size(eps_batch),
                     objective="mse")
                 with torch.no_grad():
                     adv_pred, adv_init, y_adv = adapter.forward(result.y_adv)
@@ -1330,14 +1331,14 @@ def run_attack_suite(args) -> None:
         raise ValueError(
             "requires noise_sigma_rel in summary.json, or pass --suite-eps explicitly.")
 
-    suite_alpha = suite_step_size(eps_nominal, setup.mean_sino_norm, SUITE_STEPS)
-    # eps is a relative L2 fraction: the per-sample budget is eps*||y_i||_2.
+    # eps is a relative L2 fraction: the per-sample budget is eps*||y_i||_2,
+    # and the step size is derived from it per sample too.
     print(f"[suite] dataset={summary.get('dataset')}  "
-          f"eps={eps_nominal:g}*||y||  alpha={suite_alpha:.4g}")
+          f"eps={eps_nominal:g}*||y||  alpha=2.5*eps/{SUITE_STEPS}")
 
     print(f"[suite] attacks ({len(_SUITE_ATTACKS)}): {', '.join(_SUITE_ATTACKS)}")
     if not run_suite(args, radon, summary, noise_rel, eps_nominal,
-                     attacks_root, suite_alpha):
+                     attacks_root):
         raise FileNotFoundError(
             f"No checkpoints found under model-dir '{args.model_dir}'."
         )
