@@ -899,10 +899,18 @@ def test_epoch_study_plot(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_suite_step_size_scales_with_the_budget():
-    """The classic 2.5*eps*||y||/steps, in the same units as the ball radius."""
-    a = attack.suite_step_size(eps_nominal=0.01, mean_sino_norm=100.0, steps=50)
-    assert a == pytest.approx(2.5 * 0.01 * 100.0 / 50)
-    assert attack.suite_step_size(0.02, 100.0, 50) == pytest.approx(2 * a)
+    """The classic 2.5*eps/steps, in the same units as the ball radius."""
+    a = attack.suite_step_size(1.0, steps=50)
+    assert a == pytest.approx(2.5 / 50)
+    assert attack.suite_step_size(2.0, steps=50) == pytest.approx(2 * a)
+
+
+def test_suite_step_size_is_per_sample():
+    """The budget is per sample, so the step derived from it must be too:
+    a batch of two different budgets must not collapse to one step length."""
+    eps = torch.tensor([1.0, 4.0], dtype=torch.float64)
+    alpha = attack.suite_step_size(eps, steps=50)
+    assert torch.allclose(alpha, 2.5 * eps / 50)
 
 
 def test_suite_eps_batch_is_a_relative_l2_budget():
@@ -1323,7 +1331,7 @@ def test_prepare_run_resolves_the_shared_context(tmp_path, monkeypatch):
     root = _data_root(tmp_path)
     monkeypatch.setattr(attack, "build_radon", lambda *a, **k: object())
     s = attack.prepare_run(_prep_args(root))
-    assert s.noise_rel == 0.02 and s.mean_sino_norm == 7.0
+    assert s.noise_rel == 0.02
 
 
 def test_prepare_run_out_root_defaults_to_the_noise_level(tmp_path, monkeypatch):
@@ -1582,12 +1590,20 @@ def test_svd_reconstruction(matrix_r, x):
 def test_dense_layout_matches_sparse(matrix_r, matrix_r_dense, x):
     """dense=True/float32 applies the same operators as sparse CSR/float64.
 
-    Guards the attack.py fast path: the dense float32 adapter must agree with
-    the legacy sparse float64 layout to float32 accuracy on every operator
-    that touches A / A_la.
+    Guards the pipeline's fast path. The decomposition now runs in the adapter's
+    own dtype, so this compares a float32 SVD against a float64 one and not
+    merely two storage layouts: singular directions are accurate to about
+    eps/tau ~ 3e-5 relative, which is what the tolerance below allows for.
     """
     assert matrix_r._A.layout != torch.strided
     assert matrix_r_dense._A.layout == torch.strided
+
+    # A cutoff flip would make the two operators genuinely different rather than
+    # merely differently rounded, so check it first and say so.
+    assert matrix_r._s_k_la.numel() == matrix_r_dense._s_k_la.numel(), (
+        f"float32 retained {matrix_r_dense._s_k_la.numel()} directions, float64 "
+        f"retained {matrix_r._s_k_la.numel()}: a singular value sits on the "
+        f"tau={_SVD_THRESH:g} cutoff")
 
     y = matrix_r.forward(x)
     for name, arg in [("forward", x), ("forward_la", x), ("backward_la", y),
@@ -1596,7 +1612,7 @@ def test_dense_layout_matches_sparse(matrix_r, matrix_r_dense, x):
         out_dense = getattr(matrix_r_dense, name)(arg.to(torch.float32))
         scale = out_ref.double().norm().clamp_min(arg.double().norm())
         err = (out_dense.double() - out_ref.double()).norm() / scale
-        assert err < 1e-4, f"{name}: dense/f32 deviates from sparse/f64 by {err:.3e}"
+        assert err < 3e-4, f"{name}: dense/f32 deviates from sparse/f64 by {err:.3e}"
 
     # power iteration runs on the dense layout too and lands on the same norm
     rel_norm = abs(matrix_r_dense.norm_A - matrix_r.norm_A) / matrix_r.norm_A

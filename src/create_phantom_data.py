@@ -105,8 +105,14 @@ def main() -> None:
     angles = np.linspace(0, 180, NUM_ANGLES, endpoint=False) * np.pi / 180
     phi = (MIN_ANGLE * np.pi / 180, MAX_ANGLE * np.pi / 180)
 
-    # The reconstruction operator: truncated at svd_thresh, this is the A_la^+
-    # the networks are trained to correct and the attacks differentiate through.
+    # One operator for everything: forward projection, the range projector the
+    # noise is drawn through, and the truncated pseudoinverse that reconstructs.
+    # An earlier version drew the noise through a second, essentially
+    # untruncated adapter (svd_threshold=1e-15). That cost a full extra SVD and
+    # placed part of the noise in directions A^+ annihilates, so the nominal
+    # noise level overstated what the reconstruction actually received -- while
+    # the adversarial budget, which uses this operator's projector, was fully
+    # effective. truncation_study.py quantifies the difference.
     radon = MatrixRadonAdapter(
         resolution=IMG_SIZE,
         angles=angles,
@@ -114,24 +120,12 @@ def main() -> None:
         dx=dx,
         phi=phi,
         device=DEVICE,
+        dtype=torch.float32,
+        dense=True,
         cache_dir="radon_cache",
         svd_threshold=SVD_THRESH
     )
-    # The *measurement* operator, essentially untruncated. Only its range
-    # projector is used, to draw the simulated noise from range(A_la) rather
-    # than from the truncated range the reconstruction inverts -- so the data
-    # are not produced by the same operator that reconstructs them.
-    radon_full = MatrixRadonAdapter(
-        resolution=IMG_SIZE,
-        angles=angles,
-        det_count=DET_COUNT,
-        dx=dx,
-        phi=phi,
-        device=DEVICE,
-        cache_dir="radon_cache",
-        svd_threshold=1e-15
-    )
-    print("Built Radon adapters...")
+    print("Built Radon adapter...")
 
     L = radon.norm_A2
 
@@ -141,14 +135,14 @@ def main() -> None:
     print("Generating data...")
     print("x_gt from generator")
     print("y from radon.forward_la")
-    print("y_delta = y with added noise, drawn from range(A_la)")
+    print("y_delta = y with added noise, drawn from range(U_k)")
     print("x_init from radon.backward_la (truncated pinv) -> pinv/")
 
     for i in range(N_SAMPLES):
         x_gt = torch.from_numpy(next(gen).data).to(DEVICE)
 
         y = radon.forward_la(to_4d(x_gt))
-        noise = radon_full.proj_ran(torch.randn_like(y))
+        noise = radon.proj_ran(torch.randn_like(y))
         add_noise = NOISE_sigma_REL * (torch.linalg.norm(y) / torch.linalg.norm(noise)) * noise
         y_delta = y + add_noise
 
