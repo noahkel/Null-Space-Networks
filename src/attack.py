@@ -66,7 +66,6 @@ EPOCH_EPS = 0.01
 
 NUM_WORKERS = 4
 BATCH_SIZE = 32
-MAX_SAMPLES = 128
 
 N_TRAIN = 4000
 N_TEST = 1000
@@ -77,8 +76,6 @@ SPLIT = "test"
 # the trained checkpoints live under.
 INIT_NAME = "pinv"
 
-LIPSCHITZ_SAMPLES = 8
-LIPSCHITZ_ITERS = 8
 
 SUCCESS_MSE_FACTOR = 2.0
 # --------------------------------------------------------------------------- #
@@ -626,6 +623,8 @@ def estimate_lipschitz(
     model: nn.Module,
     clean_cache: List[Tuple],
     radon,
+    n_samples: int,
+    n_iters: int,
 ) -> Dict[str, float]:
     """Operator-norm (local Lipschitz) estimate of the *learned correction*
     restricted to the null space of A_la.
@@ -642,7 +641,8 @@ def estimate_lipschitz(
     which is what governs worst-case robustness of the learned channel.
 
     ``clean_cache`` entries only need to supply (x_gt, x_init, ...) as their
-    first two elements.
+    first two elements. ``n_samples`` clean reconstructions are linearised and
+    ``n_iters`` power iterations are run at each.
     """
     proj = radon.proj_null_image
     samples: List[float] = []
@@ -650,7 +650,7 @@ def estimate_lipschitz(
     for entry in clean_cache:
         x_init = entry[1]
         for b in range(x_init.shape[0]):
-            if len(samples) >= LIPSCHITZ_SAMPLES:
+            if len(samples) >= n_samples:
                 break
             x0 = x_init[b: b + 1].detach()
 
@@ -659,7 +659,7 @@ def estimate_lipschitz(
                 return proj(model(x) - x)
             d = proj(torch.randn_like(x0))
             d = d / (torch.linalg.norm(d.reshape(-1)) + 1e-12)
-            for _ in range(LIPSCHITZ_ITERS):
+            for _ in range(n_iters):
                 _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
                 _, w = torch.autograd.functional.vjp(G, x0, proj(u), strict=False)
                 w = proj(w)
@@ -669,7 +669,7 @@ def estimate_lipschitz(
                 d = w / nw
             _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
             samples.append(float(torch.linalg.norm(proj(u).reshape(-1)).item()))
-        if len(samples) >= LIPSCHITZ_SAMPLES:
+        if len(samples) >= n_samples:
             break
 
     if not samples:
@@ -888,7 +888,7 @@ def run_suite(args, radon, summary: Dict,
         return False
     print(f"\n[suite] ===== models={model_names} =====")
 
-    projector, input_cache = build_init_inputs(args, radon, MAX_SAMPLES, device)
+    projector, input_cache = build_init_inputs(args, radon, args.max_samples, device)
 
     # Load every model + adapter once (reused for both attacking and transfer).
     models: Dict[str, nn.Module] = {}
@@ -985,7 +985,7 @@ def run_suite(args, radon, summary: Dict,
                             cur_min = worst[-1][0]
 
                 processed += x_gt.shape[0]
-                if processed >= MAX_SAMPLES:
+                if processed >= args.max_samples:
                     break
 
             metrics = summarize_metrics(rows)
@@ -1069,7 +1069,9 @@ def run_suite(args, radon, summary: Dict,
     
     lip_res: Dict[str, Dict[str, float]] = {}
     for name in model_names:
-        lip_res[name] = estimate_lipschitz(model=models[name], clean_cache=input_cache, radon=radon)
+        lip_res[name] = estimate_lipschitz(
+            model=models[name], clean_cache=input_cache, radon=radon,
+            n_samples=args.lipschitz_samples, n_iters=args.lipschitz_iters)
         r = lip_res[name]
         print(f"[suite][lipschitz] {name} mean={r['mean']:.4g} "
               f"max={r['max']:.4g} (n={r['n']})")
@@ -1242,7 +1244,7 @@ def run_epoch_study(args) -> None:
                     if getattr(args, "models", None) else None)
 
     wrote_any = False
-    projector, input_cache = build_init_inputs(args, radon, MAX_SAMPLES, device)
+    projector, input_cache = build_init_inputs(args, radon, args.max_samples, device)
 
     found = detect_suite_models(args.model_dir)
     if model_filter is not None:
@@ -1386,6 +1388,10 @@ def parse():
                         help="(Always on.) Estimate the null-restricted local Lipschitz constant "
                              "of each model's learned correction (attack-independent robustness "
                              "measure).")
+    parser.add_argument("--lipschitz-samples", type=int, default=32,
+                        help="Clean reconstructions the null-restricted gain is averaged over.")
+    parser.add_argument("--lipschitz-iters", type=int, default=16,
+                        help="Power iterations per sample for the null-restricted gain.")
     return parser.parse_args()
 
 
