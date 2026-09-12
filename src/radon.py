@@ -105,7 +105,7 @@ class MatrixRadonAdapter:
         estimate_norm: bool = True,
         norm_iters: int = 20,
         device: Optional[torch.device] = None,
-        dtype: torch.dtype = torch.float64,
+        dtype: torch.dtype = torch.float32,
         dense: bool = False,
         cache_dir: Optional[Union[str, Path]] = None,
     ):
@@ -217,16 +217,14 @@ class MatrixRadonAdapter:
         Returns U_k (m,k), s_k (k,), Vt_k (k,n) as torch tensors on self.device,
         retaining singular values >= svd_threshold * s_max.
 
-        GPU strategy: densify as float64 and run torch.linalg.svd (full thin SVD
-        in one pass).  Falls back to dense CPU LAPACK, which is also the path
-        every CPU-only run (the test suite) takes.
         """
+        np_dtype = np.float32 if self.dtype == torch.float32 else np.float64
         m, n = csr.shape
 
         def _t(arr) -> torch.Tensor:
             if isinstance(arr, torch.Tensor):
                 return arr.to(device=self.device, dtype=self.dtype)
-            return torch.from_numpy(np.asarray(arr, dtype=np.float64)).to(
+            return torch.from_numpy(np.asarray(arr)).to(
                 device=self.device, dtype=self.dtype
             )
 
@@ -252,32 +250,32 @@ class MatrixRadonAdapter:
         # ------------------------------------------------------------------
 
         if self.device.type == "cuda":
-            mem_gb = m * n * 8 / 1e9  # float64
-            print(f"  densifying {m}×{n} on GPU ({mem_gb:.1f} GB fp64)")
-            dense_f64 = None
+            itemsize = np.dtype(np_dtype).itemsize
+            print(f"  densifying {m}×{n} on GPU ({m * n * itemsize / 1e9:.1f} GB, {np_dtype.__name__})")
+            dense = None
             try:
-                dense_f64 = torch.from_numpy(csr.toarray().astype(np.float64)).to(self.device)
+                dense = torch.from_numpy(csr.toarray().astype(np_dtype)).to(self.device)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    U_t, s_t, Vh_t = torch.linalg.svd(dense_f64, full_matrices=False)
+                    U_t, s_t, Vh_t = torch.linalg.svd(dense, full_matrices=False)
                 result = _cut_and_return(
                     U_t.cpu().numpy(), s_t.cpu().numpy(), Vh_t.cpu().numpy(), "GPU"
                 )
-                del dense_f64, U_t, s_t, Vh_t
+                del dense, U_t, s_t, Vh_t
                 torch.cuda.empty_cache()
                 return result
             except Exception as exc:
-                if dense_f64 is not None:
-                    del dense_f64
+                if dense is not None:
+                    del dense
                 torch.cuda.empty_cache()
                 print(f"  GPU SVD failed ({exc}); falling back to CPU ...")
 
         # ------------------------------------------------------------------
         # CPU path: dense LAPACK
         # ------------------------------------------------------------------
-        mem_gb_f64 = m * n * 8 / 1e9
-        print(f"  densifying {m}×{n} on CPU ({mem_gb_f64:.1f} GB fp64) ...")
-        dense = csr.toarray().astype(np.float64)
+        itemsize = np.dtype(np_dtype).itemsize
+        print(f"  densifying {m}×{n} on CPU ({m * n * itemsize / 1e9:.1f} GB, {np_dtype.__name__}) ...")
+        dense = csr.toarray().astype(np_dtype)
         U, s_cpu, Vt = scipy.linalg.svd(dense, full_matrices=False)
         del dense
         return _cut_and_return(U, s_cpu, Vt, "CPU LAPACK")
@@ -294,19 +292,17 @@ class MatrixRadonAdapter:
         h.update(repr(self.phi).encode())
         h.update(repr(self.svd_threshold).encode())
         h.update(self.angles.tobytes())
-        # Canonical dtype string: cached artifacts are stored as float64 npz/npy
-        # and cast to self.dtype on load, so float32 and float64 adapters share
-        # one cache. Hashing the literal keeps existing float64 caches valid.
-        h.update(str(torch.float64).encode())
+        # The decomposition now runs in self.dtype, so a float32 and a float64
+        # adapter no longer produce the same factors and must not share a cache.
+        h.update(str(self.dtype).encode())
         return h.hexdigest()[:16]
 
     def _save_cache(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
-        # Artifacts are always saved as float64 (the cache is shared across
-        # adapter dtypes; _load_cache casts to self.dtype).
+        # Saved in the adapter's own dtype; the cache key includes it.
         for name, mat in [("A", self._A), ("A_la", self._A_la)]:
-            t = mat.cpu().to(torch.float64)
+            t = mat.cpu()
             if t.layout == torch.strided:
                 csr = scipy.sparse.csr_matrix(t.numpy())
             else:
@@ -322,12 +318,11 @@ class MatrixRadonAdapter:
             ("Vt_k_la",getattr(self, "_Vt_k_la",None)),
         ]:
             if tensor is not None:
-                np.save(str(path / f"{name}.npy"),
-                        tensor.cpu().to(torch.float64).numpy())
+                np.save(str(path / f"{name}.npy"), tensor.cpu().numpy())
 
     def _load_cache(self, path: Path) -> None:
-        self._A    = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A.npz")).astype(np.float64))
-        self._A_la = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A_la.npz")).astype(np.float64))
+        self._A    = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A.npz")))
+        self._A_la = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A_la.npz")))
 
         for name in ("U_k_la", "s_k_la", "Vt_k_la"):
             p = path / f"{name}.npy"
@@ -340,7 +335,7 @@ class MatrixRadonAdapter:
             return torch.from_numpy(mat.toarray()).to(dtype=self.dtype, device=self.device)
         crow = torch.from_numpy(mat.indptr.astype(np.int64))
         col  = torch.from_numpy(mat.indices.astype(np.int64))
-        val  = torch.from_numpy(mat.data.astype(np.float64))
+        val  = torch.from_numpy(mat.data.astype(np.float64))  # sparse_csr_tensor casts
         t = torch.sparse_csr_tensor(crow, col, val, size=mat.shape, dtype=self.dtype)
         return t.to(self.device)
 
