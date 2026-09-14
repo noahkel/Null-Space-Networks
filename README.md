@@ -16,25 +16,21 @@ operator. `thesis.tex` is the write-up; this file is how to run it.
 | `train.py` | trains both architectures on one noise level |
 | `src/attack.py` (entry: `attack.py`) | PGD attack suite, epoch study, metrics, Lipschitz estimate |
 | `src/visualisations.py` (entry: `visualise.py`) | every figure, rebuilt from saved artifacts only |
-| `pipeline.sh` | the full Slurm pipeline over all noise levels |
+| `slurm_full_run.sh` | the full experiment for one noise level as one Slurm job |
 | `truncation_study.py`, `slurm_truncation_study.sh` | the one-off study behind using a single truncation throughout |
-| `tests/test_nsn.py` | the test suite; also the pre-submit gate |
+| `tests/test_nsn.py` | the test suite |
 
 ## Running
 
 Everything runs from the repository root, in the `data_prox2` environment.
 
-The whole experiment, as chained Slurm arrays (one task per noise level):
+The whole experiment for one noise level, as one Slurm job (tests, data,
+training, attack suite, epoch study, figures; a failing stage aborts):
 
 ```bash
-bash pipeline.sh --dry-run        # show the plan
-bash pipeline.sh                  # submit prep -> {attack, epoch} -> render
-bash pipeline.sh --only render    # redraw figures from existing artifacts
-CREATE_DATA=0 TRAIN=0 bash pipeline.sh   # reuse data and models
+sbatch --export=ALL,NOISE=0.01 slurm_full_run.sh
+sbatch --export=ALL,NOISE=0.01,CREATE_DATA=0,TRAIN=0 slurm_full_run.sh   # reuse data and models
 ```
-
-The test suite runs before anything is submitted and a failure aborts the
-submission; `--skip-tests` overrides that.
 
 The stages by hand, for one noise level:
 
@@ -57,8 +53,7 @@ python visualise.py attacks_n0.01
   effective; `truncation_study.py` measures this.
 - **Single precision, dense layout** in every stage. The geometry cache under
   `radon_cache/` is keyed on the geometry, τ and the dtype, and is shared by all
-  stages. Entries are published atomically, so concurrent array tasks can build
-  the same entry safely.
+  stages.
 - **Splits are by index**: samples 0–3499 train, 3500–3999 select the
   checkpoint, 4000–4999 are the test set every reported number comes from.
   The test set is never used for training or for model selection.

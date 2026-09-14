@@ -14,9 +14,6 @@ zeroed, so every sinogram in a run has the same shape.
 """
 import hashlib
 import math
-import os
-import shutil
-import uuid
 import warnings
 from pathlib import Path
 from typing import Optional, Tuple, Union
@@ -143,8 +140,9 @@ class MatrixRadonAdapter:
 
         cache_path = Path(cache_dir) / self._cache_key() if cache_dir is not None else None
         print(f"Cache path: {cache_path}")
-        if cache_path is not None and self._try_load_cache(cache_path):
-            print(f"Loaded matrix cache from {cache_path}")
+        if cache_path is not None and cache_path.exists():
+            print(f"Loading matrix cache from {cache_path}")
+            self._load_cache(cache_path)
         else:
             try:
                 import astra as _astra
@@ -301,41 +299,9 @@ class MatrixRadonAdapter:
         h.update(str(self.dtype).encode())
         return h.hexdigest()[:16]
 
-    # Written last into a finished entry. Its presence is what makes an entry a
-    # cache hit, so a directory without it is never read as a complete cache.
-    _CACHE_MARKER = "COMPLETE"
-
     def _save_cache(self, path: Path) -> None:
-        """Publish the cache entry atomically.
+        path.mkdir(parents=True, exist_ok=True)
 
-        Every file is written into a private temporary directory beside the
-        final one, which is then renamed into place in one step. Pipeline stages
-        run concurrently as a Slurm array over noise levels with an identical
-        geometry, so several tasks can miss the same key at once: without the
-        rename a reader could load an entry another task was still writing, and
-        a job killed mid-write would leave a corrupt entry behind for good. If
-        another task publishes first, the rename fails and this copy is
-        discarded -- both copies were computed from the same inputs.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.parent / f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-        tmp.mkdir()
-        try:
-            self._write_cache_files(tmp)
-            (tmp / self._CACHE_MARKER).write_text("ok\n", encoding="utf-8")
-            try:
-                os.rename(tmp, path)
-            except OSError:
-                # Lost the race (or a stale incomplete entry is in the way); a
-                # complete entry from another task is equally good.
-                if not (path / self._CACHE_MARKER).exists():
-                    raise
-                print(f"Cache {path.name} was published concurrently; keeping that copy.")
-        finally:
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-
-    def _write_cache_files(self, path: Path) -> None:
         # Saved in the adapter's own dtype; the cache key includes it.
         for name, mat in [("A", self._A), ("A_la", self._A_la)]:
             t = mat.cpu()
@@ -356,60 +322,15 @@ class MatrixRadonAdapter:
             if tensor is not None:
                 np.save(str(path / f"{name}.npy"), tensor.cpu().numpy())
 
-    def _try_load_cache(self, path: Path) -> bool:
-        """Load a cache entry if it is complete and valid; report whether it was.
-
-        An entry carrying the completion marker is trusted to be whole. An entry
-        without it predates the marker, or was left by a writer that crashed
-        before the atomic publish existed: it is loaded and validated, adopted
-        by writing the marker if it passes, and removed if it does not. No live
-        writer can be behind a markerless entry, because writers now publish by
-        renaming a finished directory into place.
-        """
-        if not path.is_dir():
-            return False
-        complete = (path / self._CACHE_MARKER).exists()
-        try:
-            self._load_cache(path)
-        except Exception as exc:
-            if complete:
-                raise
-            print(f"Discarding incomplete cache {path.name} ({exc}); rebuilding.")
-            shutil.rmtree(path, ignore_errors=True)
-            return False
-        if not complete:
-            (path / self._CACHE_MARKER).write_text("ok\n", encoding="utf-8")
-            print(f"Adopted pre-existing cache {path.name} after validation.")
-        return True
-
     def _load_cache(self, path: Path) -> None:
         self._A    = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A.npz")))
         self._A_la = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A_la.npz")))
 
-        n = self.resolution ** 2
-        m_la = int(self._la_row_mask.sum())
-        if tuple(self._A_la.shape) != (m_la, n):
-            raise ValueError(f"cached A_la has shape {tuple(self._A_la.shape)}, "
-                             f"expected {(m_la, n)}")
-
-        if self.svd_threshold > 0:
-            for name in ("U_k_la", "s_k_la", "Vt_k_la"):
-                p = path / f"{name}.npy"
-                if not p.exists():
-                    raise FileNotFoundError(f"cache is missing {name}.npy")
+        for name in ("U_k_la", "s_k_la", "Vt_k_la"):
+            p = path / f"{name}.npy"
+            if p.exists():
                 setattr(self, f"_{name}",
                         torch.from_numpy(np.load(str(p))).to(device=self.device, dtype=self.dtype))
-            k = self._s_k_la.numel()
-            if (tuple(self._U_k_la.shape) != (m_la, k)
-                    or tuple(self._Vt_k_la.shape) != (k, n)):
-                raise ValueError(
-                    f"cached factors have inconsistent shapes U{tuple(self._U_k_la.shape)} "
-                    f"s({k},) Vt{tuple(self._Vt_k_la.shape)}")
-            # Validated once here rather than on every application: a check in
-            # backward_la would force a GPU sync inside the PGD inner loop.
-            for name, t in (("U", self._U_k_la), ("s", self._s_k_la), ("Vt", self._Vt_k_la)):
-                if not torch.isfinite(t).all():
-                    raise ValueError(f"cached SVD factor {name} contains NaN/Inf")
 
     def _csr_to_torch(self, mat: scipy.sparse.csr_matrix) -> torch.Tensor:
         if self.dense:
@@ -544,8 +465,8 @@ class MatrixRadonAdapter:
         B, C, n_la, nd = y_compact.shape
         y_flat = (y_compact / self.dx).reshape(B * C, n_la * nd).to(dtype=self.dtype, device=self.device)
         x_flat = self._apply_pseudoinverse(y_flat, self._U_k_la, self._s_k_la, self._Vt_k_la)
-        # The factors are checked for NaN/Inf once, when built or loaded; this
-        # function sits in the PGD inner loop and must not force a GPU sync.
+        # The factors are checked for NaN/Inf once, when built; this function
+        # sits in the PGD inner loop and must not force a GPU sync.
         return x_flat.reshape(B, C, self.resolution, self.resolution).to(device=orig_device, dtype=orig_dtype)
 
     @staticmethod

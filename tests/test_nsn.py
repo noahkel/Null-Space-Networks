@@ -1851,10 +1851,8 @@ def test_ensure_dir_creates_nested(tmp_path):
 
 
 # =========================================================================== #
-# Geometry cache — atomic publish and validated load. The prep stage runs the
-# noise levels as a concurrent Slurm array with one shared geometry, so several
-# tasks can miss the same cache key at once. These build a tiny adapter shell
-# by hand, so they need neither astra nor a GPU.
+# Geometry cache — save/load round trip. Builds a tiny adapter shell by hand, so
+# it needs neither astra nor a GPU.
 # =========================================================================== #
 def _cache_shell(dtype=torch.float64):
     pytest.importorskip("scipy")
@@ -1868,74 +1866,18 @@ def _cache_shell(dtype=torch.float64):
     return r
 
 
-def _filled_cache_shell():
-    r = _cache_shell()
-    g = torch.Generator().manual_seed(0)
-    r._A = torch.randn(4, 4, generator=g, dtype=torch.float64)
-    r._A_la = r._A[:2].clone()
-    r._U_k_la = torch.randn(2, 2, generator=g, dtype=torch.float64)
-    r._s_k_la = torch.tensor([2.0, 1.0], dtype=torch.float64)
-    r._Vt_k_la = torch.randn(2, 4, generator=g, dtype=torch.float64)
-    return r
-
-
 def test_cache_round_trip_restores_the_factors(tmp_path):
-    src = _filled_cache_shell()
+    src = _cache_shell()
+    g = torch.Generator().manual_seed(0)
+    src._A = torch.randn(4, 4, generator=g, dtype=torch.float64)
+    src._A_la = src._A[:2].clone()
+    src._U_k_la = torch.randn(2, 2, generator=g, dtype=torch.float64)
+    src._s_k_la = torch.tensor([2.0, 1.0], dtype=torch.float64)
+    src._Vt_k_la = torch.randn(2, 4, generator=g, dtype=torch.float64)
     path = tmp_path / "key"
     src._save_cache(path)
-    assert (path / src._CACHE_MARKER).exists()
 
     dst = _cache_shell()
-    assert dst._try_load_cache(path)
+    dst._load_cache(path)
     for name in ("_A", "_A_la", "_U_k_la", "_s_k_la", "_Vt_k_la"):
         assert torch.allclose(getattr(dst, name), getattr(src, name)), name
-
-
-def test_cache_publish_leaves_no_temporary_directories(tmp_path):
-    _filled_cache_shell()._save_cache(tmp_path / "key")
-    assert [q.name for q in tmp_path.iterdir()] == ["key"]
-
-
-def test_cache_publish_keeps_a_copy_published_concurrently(tmp_path):
-    """The second of two tasks racing for one key must keep the first copy and
-    not fail, since both were computed from the same inputs."""
-    path = tmp_path / "key"
-    first = _filled_cache_shell()
-    first._save_cache(path)
-    second = _filled_cache_shell()
-    second._s_k_la = torch.tensor([9.0, 9.0], dtype=torch.float64)
-    second._save_cache(path)                               # loses the race
-    reader = _cache_shell()
-    assert reader._try_load_cache(path)
-    assert torch.allclose(reader._s_k_la, first._s_k_la)
-    assert [q.name for q in tmp_path.iterdir()] == ["key"]
-
-
-def test_cache_without_marker_and_incomplete_is_discarded(tmp_path):
-    """What a writer killed mid-write used to leave behind: never a cache hit."""
-    path = tmp_path / "key"
-    staging = tmp_path / "staging"
-    staging.mkdir()
-    _filled_cache_shell()._write_cache_files(staging)
-    path.mkdir()
-    (staging / "A.npz").rename(path / "A.npz")               # A only
-    assert not _cache_shell()._try_load_cache(path)
-    assert not path.exists()
-
-
-def test_cache_without_marker_but_complete_is_adopted(tmp_path):
-    """Entries written before the marker existed are validated and kept."""
-    path = tmp_path / "key"
-    path.mkdir()
-    _filled_cache_shell()._write_cache_files(path)
-    assert _cache_shell()._try_load_cache(path)
-    assert (path / "COMPLETE").exists()
-
-
-def test_cache_with_non_finite_factors_is_rejected(tmp_path):
-    path = tmp_path / "key"
-    bad = _filled_cache_shell()
-    bad._Vt_k_la[0, 0] = float("nan")
-    path.mkdir()
-    bad._write_cache_files(path)
-    assert not _cache_shell()._try_load_cache(path)

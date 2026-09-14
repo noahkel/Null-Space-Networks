@@ -6,8 +6,7 @@
 #   sbatch slurm_truncation_study.sh
 #   sbatch --export=ALL,N_SAMPLES=128 slurm_truncation_study.sh
 #
-# Deliberately not a stage of pipeline.sh: it answers a design question once,
-# it is not part of producing a result.
+# It answers a design question once; it is not part of producing a result.
 #
 #SBATCH --job-name=nsn-truncation
 #SBATCH --output=logs/%x_%j.out

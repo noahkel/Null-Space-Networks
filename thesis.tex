@@ -372,11 +372,10 @@ Building the matrices and decomposing them is expensive but depends only on the
 geometry, never on the data. Both are therefore cached on disk under a SHA-256
 hash of the resolution, detector count, pixel spacing, angle vector,
 limited-angle window, truncation threshold and floating-point precision, so that
-a rerun with the same geometry loads them instead of recomputing them. Every
-stage of the pipeline --- data generation, training and the attacks --- asks for
-the same geometry at the same precision, so one cache entry serves all three and
-the singular value decomposition is computed exactly once per noise-independent geometry.\\
-%TODO: Discard pipeline and concurrent runs, i dont think we need them anymore, also discard recent changes to the cache, since it will not be needed anymore!
+a rerun with the same geometry loads them instead of recomputing them. Data
+generation, training and the attacks all ask for the same geometry at the same
+precision, so one cache entry serves all three and the singular value
+decomposition is computed exactly once per noise-independent geometry.\\
 \subsection{Pseudoinverse}\label{sec:pinv}
 The pseudoinverse of Section \ref{sec:pseudoinverse} requires the singular value decomposition of
 the system matrix, and this is the single most expensive computation in the
@@ -1177,13 +1176,6 @@ cross-model transfer stacks and the aggregated summary. Every figure in Chapter
 a Radon operator being loaded. A figure can therefore be redrawn at any time
 without repeating the attack that produced it, which matters because a full
 attack run takes several GPU-hours.\\
-The four noise levels are processed by a Slurm pipeline as four job arrays over
-three dependency levels: data generation and training first; then the attack
-suite and the epoch study, which both depend only on that first level and
-therefore run concurrently; then the rendering, which waits for both. Because
-the four noise levels are entirely independent of one another, each level of the
-pipeline is an array over them rather than a loop, so the critical path is one
-noise level deep rather than four.\\
 %PersonalTODO: Check this section
 Reproducibility rests on three things. The random seeds are fixed for data
 generation, for training and for the attacks. Training is reproducible closely
@@ -1196,8 +1188,7 @@ of its measured trace $\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})
 the agreement of the truncated factors with the sparse system matrix, the
 orthogonality of the error decomposition and the enforcement of the attack
 budget --- are covered by a test suite that exercises them against the real
-operator rather than a mock, as are the per-sample choice of restart and the
-integrity of the geometry cache.
+operator rather than a mock, as is the per-sample choice of restart.
 
 \section{Results}\label{sec:results}
 \subsection{Model performance}
