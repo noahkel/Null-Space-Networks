@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 import argparse
 from src.radon import MatrixRadonAdapter
 import matplotlib.pyplot as plt
-from src.utils import mse_loss, to_4d, build_models
+from src.utils import mse_loss, set_seed, to_4d, build_models
 from typing import List
 
 from src.ellipse_dataloader import get_ellipse_dataloader
@@ -90,7 +90,13 @@ def eval_one_epoch(
 
     return running / max(n, 1)
 
-def main(out_dir, data_dir, models, checkpoint_every=0):
+def main(out_dir, data_dir, models, checkpoint_every=0, seed=0):
+
+    # Seeds weight initialisation and the shuffle order of the training loader,
+    # so two runs on the same data start from the same weights and see the same
+    # batches. cuDNN convolution kernels are not bit-deterministic on the GPU,
+    # so runs agree closely rather than exactly.
+    set_seed(seed)
 
     DATA_ROOT = data_dir
     OUT_DIR = out_dir
@@ -121,7 +127,11 @@ def main(out_dir, data_dir, models, checkpoint_every=0):
     SVD_THRESH = float(summary["svd_threshold"])
     dx = summary["dx"]
 
-    n_train = 4000
+    # Samples [0, 3500) train, [3500, 4000) select the best checkpoint, and
+    # [4000, 5000) are held out for evaluation -- never seen by training or by
+    # model selection. attack.py reads the same split.
+    n_train = 3500
+    n_val = 500
     n_test = 1000
 
     # -------------------------
@@ -152,6 +162,7 @@ def main(out_dir, data_dir, models, checkpoint_every=0):
         batch_size=BATCH_SIZE,
         split="train",
         n_train=n_train,
+        n_val=n_val,
         n_test=n_test,
         data_root=DATA_ROOT,
         shuffle=True,
@@ -160,8 +171,9 @@ def main(out_dir, data_dir, models, checkpoint_every=0):
 
     val_loader = get_ellipse_dataloader(
         batch_size=BATCH_SIZE,
-        split="test",
+        split="val",
         n_train=n_train,
+        n_val=n_val,
         n_test=n_test,
         data_root=DATA_ROOT,
         shuffle=False,
@@ -236,6 +248,8 @@ if __name__ == "__main__":
                              "(e.g. ./data/0.01), containing summary.json and the "
                              "gt/sino/pinv folders.")
     parser.add_argument("--models", type=str, default="resnet,nsn")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Seed for weight initialisation and batch order.")
     parser.add_argument("--checkpoint-every", type=int, default=0, metavar="N",
                         help="Save every Nth epoch's weights ({model}_epoch{NNN}.pt) so the "
                              "epoch-attack study can attack those epochs individually "
@@ -244,5 +258,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print("Successfully parsed args")
     main(out_dir=Path(args.out_dir), data_dir=Path(args.data_dir),
-         models=parse_list_arg(args.models), checkpoint_every=args.checkpoint_every)
+         models=parse_list_arg(args.models), checkpoint_every=args.checkpoint_every,
+         seed=args.seed)
     print("Finished.")

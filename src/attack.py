@@ -5,13 +5,13 @@ This is the *attack/compute* half of the attack/visualisation split. It owns:
 
   * the attack primitives (norm projections, gradient normalisation),
   * the attack objectives and the PGD attack that maximises them,
-  * the init reconstructor + model adapter that turn a sinogram into a prediction,
+  * the model adapter that turns a sinogram into a prediction via A^+,
   * per-sample metric evaluation and aggregation,
-  * the suite orchestration that attacks every model for every init method.
+  * the suite orchestration that attacks every trained model.
 
 Each run writes its numeric artifacts to disk (per_sample_metrics.csv, attack_output.npz
 with the adversarial sinogram + perturbation, examples.npz/.json,
-transfer.npz/.json, summary.json, lipschitz_nullspace.json)
+transfer.npz/.json, summary.json, lipschitz.json)
 ``visualise.py`` rebuilds every figure from those artifacts, so plots can be
 regenerated without re-running the attack.
 
@@ -67,7 +67,10 @@ EPOCH_EPS = 0.01
 NUM_WORKERS = 4
 BATCH_SIZE = 32
 
-N_TRAIN = 4000
+# Must match train.py: the test split is the one neither training nor
+# checkpoint selection has seen.
+N_TRAIN = 3500
+N_VAL = 500
 N_TEST = 1000
 SPLIT = "test"
 
@@ -105,7 +108,7 @@ def proj_l2_ball(delta: torch.Tensor, eps: Budget) -> torch.Tensor:
 
 def project_delta(delta: torch.Tensor, eps: Budget,
                   projector: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-    """Projection onto the feasible set S = range(A_la) ∩ {||δ||_2 ≤ ε}."""
+    """Projection onto the feasible set S = range(U_k) ∩ {||δ||_2 ≤ ε}."""
     return projector(proj_l2_ball(projector(delta), eps))
 
 def suite_eps_batch(y_clean: torch.Tensor, eps_nominal: float) -> torch.Tensor:
@@ -120,10 +123,29 @@ def suite_step_size(eps: Budget, steps: int = SUITE_STEPS) -> Budget:
     budget. Since the budget is per sample, so is the step."""
     return 2.5 * eps / max(steps, 1)
 
+def per_sample_loss(loss_map: torch.Tensor) -> torch.Tensor:
+    """Mean over every axis but the batch axis: one score per sample."""
+    return loss_map.reshape(loss_map.shape[0], -1).mean(dim=1)
+
 def reduce_loss(loss_map: torch.Tensor) -> torch.Tensor:
     if loss_map.ndim <= 1:
         return loss_map.mean()
-    return loss_map.reshape(loss_map.shape[0], -1).mean(dim=1).mean()
+    return per_sample_loss(loss_map).mean()
+
+def random_start(y_clean: torch.Tensor, eps: Budget,
+                 projector: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
+    """A random point of S = range(P) ∩ B_eps, per sample.
+
+    The direction is a projected Gaussian, which is isotropic within range(P),
+    normalised to unit length; the radius is uniform on [0, eps_i]. Drawing the
+    Gaussian and merely clipping it to the ball instead would start every sample
+    at radius min(||g||, eps) -- a number set by the sinogram dimension, not by
+    the budget -- so all restarts would begin on the same sphere."""
+    d = projector(torch.randn_like(y_clean))
+    d = d / l2_norm_batch(d).clamp_min(1e-12).view(-1, 1, 1, 1)
+    radius = torch.rand(y_clean.shape[0], device=y_clean.device,
+                        dtype=y_clean.dtype).view(-1, 1, 1, 1)
+    return d * radius * as_eps_batch(eps, y_clean)
 
 def per_example_mse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return ((x - y) ** 2).reshape(x.shape[0], -1).mean(dim=1)
@@ -185,8 +207,13 @@ def attack_objective(
     objective: str,
     radon=None,
     target: Optional[torch.Tensor] = None,
+    reduction: str = "mean",
 ) -> torch.Tensor:
     """Attack loss to be *maximised*.
+
+    ``reduction="mean"`` returns the batch mean that gradients are taken of;
+    ``reduction="none"`` returns one score per sample, which is what selecting
+    the best restart per sample needs.
 
     The plain "mse" objectives reward total reconstruction
     error. On a data-consistent model NSN the cheapest way to grow that
@@ -208,8 +235,15 @@ def attack_objective(
     #   null        :  mean( (P_N e)^2 )               (structural / learned channel)
     #   zero        : -mean(pred^2)                    (targeted: drive pred -> 0)
     #   target      : -mean((pred - t)^2)              (targeted: drive pred -> t)
+    if reduction == "mean":
+        red = reduce_loss
+    elif reduction == "none":
+        red = per_sample_loss
+    else:
+        raise ValueError(f"Unknown reduction '{reduction}' (mean or none)")
+
     if objective == "mse":
-        return reduce_loss((pred - x_gt) ** 2)
+        return red((pred - x_gt) ** 2)
 
     if objective == "range":
         # Null-space *complement*: reward only the range (measured) error component
@@ -217,24 +251,24 @@ def attack_objective(
             raise ValueError("Objective 'range' requires a radon operator.")
         err = pred - x_gt
         err_range = err - radon.proj_null_image(err)
-        return reduce_loss(err_range ** 2)
+        return red(err_range ** 2)
 
     if objective == "null":
         # Null-space: reward only the null-space error component
         if radon is None:
             raise ValueError("Objective 'null' requires a radon operator.")
         err = pred - x_gt
-        return reduce_loss(radon.proj_null_image(err)**2)
+        return red(radon.proj_null_image(err) ** 2)
 
     if objective == "zero":
         # Targeted attack: drive the reconstruction toward the zero image
-        return -reduce_loss(pred ** 2)
+        return -red(pred ** 2)
 
     if objective == "target":
         # General targeted attack: drive the reconstruction toward an arbitrary supplied image
         if target is None:
             raise ValueError("Objective 'target' requires a target image tensor.")
-        return -reduce_loss((pred - target.detach()) ** 2)
+        return -red((pred - target.detach()) ** 2)
 
     raise ValueError(f"Unknown objective '{objective}'")
 
@@ -251,15 +285,18 @@ def pgd_attack(
     """Projected gradient ascent on the sinogram perturbation -- the one attack
     the suite runs.
 
-    The feasible set is S = range(A_la) intersect {||delta||_2 <= eps}: the
+    The feasible set is S = range(U_k) intersect {||delta||_2 <= eps}: the
     perturbation must itself be a measurement the scanner could have taken
     (anything else is not a perturbation an attacker could make) and stay
     inside the L2 budget. Each step is
 
         delta <- Pi_S( delta + alpha * normalize(grad_delta loss) )
 
-    started from a random point of the ball, and the best of ``restarts`` runs
-    (highest objective) is returned.
+    started from a random point of S (see random_start). Of the restarts, the
+    best one is kept *per sample*: a batch-level choice would hand every sample
+    the restart that is best on average, which is weaker for any sample whose
+    own best came from another restart, and would understate how attackable the
+    model is.
 
     ``objective`` is maximised; see attack_objective. ``target`` supplies the
     reference image for the targeted 'target' objective and is ignored by the
@@ -268,16 +305,16 @@ def pgd_attack(
     start = time.perf_counter()
     radon = adapter.radon
     alpha_b = as_eps_batch(alpha, y_clean)
-    best_y_adv = y_clean.detach().clone()
     best_delta = torch.zeros_like(y_clean)
-    best_score = -float("inf")
+    best_score = torch.full((y_clean.shape[0],), -float("inf"),
+                            device=y_clean.device, dtype=y_clean.dtype)
 
-    def loss_of(pred):
-        return attack_objective(pred, x_gt, objective, radon=radon, target=target)
+    def loss_of(pred, reduction="mean"):
+        return attack_objective(pred, x_gt, objective, radon=radon, target=target,
+                                reduction=reduction)
 
     for _ in range(SUITE_RESTARTS):
-        delta = adapter.projector(proj_l2_ball(torch.randn_like(y_clean), eps))
-        delta = project_delta(delta, eps, adapter.projector)
+        delta = random_start(y_clean, eps, adapter.projector)
 
         for _ in range(SUITE_STEPS):
             y_adv = (y_clean + delta).detach().requires_grad_(True)
@@ -288,15 +325,14 @@ def pgd_attack(
                 delta = project_delta(delta + alpha_b * g, eps, adapter.projector)
 
         with torch.no_grad():
-            y_adv = y_clean + delta
-            pred, _, _ = adapter.forward(y_adv, project=False)
-            score = float(loss_of(pred).item())
-            if score > best_score:
-                best_score = score
-                best_y_adv = y_adv.detach().clone()
-                best_delta = (best_y_adv - y_clean).detach().clone()
+            pred, _, _ = adapter.forward(y_clean + delta, project=False)
+            score = loss_of(pred, reduction="none")
+            better = score > best_score
+            best_score = torch.where(better, score, best_score)
+            best_delta = torch.where(better.view(-1, 1, 1, 1), delta, best_delta)
 
-    return AttackResult(y_adv=best_y_adv, delta=best_delta,
+    best_delta = best_delta.detach()
+    return AttackResult(y_adv=(y_clean + best_delta).detach(), delta=best_delta,
                         runtime_sec=time.perf_counter() - start)
 
 # --------------------------------------------------------------------------- #
@@ -790,7 +826,7 @@ def build_init_inputs(args, radon, max_samples: int, device):
     byte-identical inputs, which is the basis for comparing them."""
     loader = get_ellipse_dataloader(
         batch_size=BATCH_SIZE,
-        split=SPLIT, n_train=N_TRAIN, n_test=N_TEST,
+        split=SPLIT, n_train=N_TRAIN, n_val=N_VAL, n_test=N_TEST,
         shuffle=False, num_workers=NUM_WORKERS, data_root=args.data_root,
     )
     proj = lambda y: radon.proj_ran(y)

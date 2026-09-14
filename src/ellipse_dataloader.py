@@ -54,30 +54,38 @@ class EllipsesGTInitDataset(Dataset):
 def get_ellipse_dataloader(
     batch_size: int,
     data_root: Path = Path("ellipses_out"),
-    split: str = "train",          # "train" or "test"
-    n_train: int = 4000,
+    split: str = "train",          # "train", "val" or "test"
+    n_train: int = 3500,
+    n_val: int = 500,
     n_test: int = 1000,
     shuffle: bool = True,
     num_workers: int = 4,
     device: Optional[torch.device] = None,
 ) -> DataLoader:
-    """Train/test loader over a data directory. The split is by index and
-    therefore deterministic: the first n_train samples train, the next n_test
-    test."""
+    """Train/val/test loader over a data directory. The split is by index and
+    therefore deterministic: the first n_train samples train, the next n_val
+    validate, the next n_test test.
+
+    Validation and test are kept apart on purpose. Training keeps the checkpoint
+    with the lowest validation loss; if that loss were measured on the test set,
+    every number later reported on the test set would come from the checkpoint
+    chosen to look best there."""
     dataset = EllipsesGTInitDataset(root=Path(data_root), device=device)
 
     indices = np.arange(len(dataset))
-    train_idx = indices[:n_train]
-    test_idx = indices[n_train:n_train + n_test]
-
-    if split == "train":
-        subset = Subset(dataset, train_idx)
-        do_shuffle = shuffle
-    elif split == "test":
-        subset = Subset(dataset, test_idx)
-        do_shuffle = False
-    else:
-        raise ValueError("split must be 'train' or 'test'")
+    bounds = {
+        "train": (0, n_train),
+        "val": (n_train, n_train + n_val),
+        "test": (n_train + n_val, n_train + n_val + n_test),
+    }
+    if split not in bounds:
+        raise ValueError("split must be 'train', 'val' or 'test'")
+    lo, hi = bounds[split]
+    if hi > len(dataset):
+        raise ValueError(f"split '{split}' needs samples [{lo}, {hi}) but the "
+                         f"dataset has {len(dataset)}")
+    subset = Subset(dataset, indices[lo:hi])
+    do_shuffle = shuffle and split == "train"
 
     return DataLoader(
         subset,

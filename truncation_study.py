@@ -71,9 +71,11 @@ def main() -> None:
     det_count = int(np.sqrt(2) * args.img_size) + 1
     angles = np.linspace(0, 180, args.num_thetas, endpoint=False) * np.pi / 180
     phi = (args.min_angle * np.pi / 180, args.max_angle * np.pi / 180)
+    # Same dtype and layout as the pipeline, so the tau=4e-3 operator is read
+    # straight from radon_cache and only the tau=1e-15 one has to be decomposed.
     common = dict(resolution=args.img_size, angles=angles, det_count=det_count,
                   dx=1.0, phi=phi, device=device, cache_dir=args.cache_dir,
-                  estimate_norm=False)
+                  dtype=torch.float32, dense=True, estimate_norm=False)
 
     print(f"geometry: {args.img_size}^2 image, {det_count} detectors, "
           f"{args.num_thetas} angles, window {args.min_angle}-{args.max_angle} deg")

@@ -321,6 +321,63 @@ def test_pgd_mse_objective_grows_error(radon):
     assert attack.l2_norm_batch(adv_pred - x_gt).mean() > attack.l2_norm_batch(clean_pred - x_gt).mean()
 
 
+def test_objective_per_sample_scores_average_to_the_batch_loss(radon):
+    """reduction='none' must be the same objective, just not yet averaged."""
+    pred, gt = _rand(4, 1, IMG, IMG), _rand(4, 1, IMG, IMG)
+    for name in ("mse", "null", "range", "zero"):
+        per = attack.attack_objective(pred, gt, name, radon=radon, reduction="none")
+        assert per.shape == (4,)
+        mean = attack.attack_objective(pred, gt, name, radon=radon)
+        assert torch.allclose(per.mean(), mean)
+
+
+def test_objective_rejects_an_unknown_reduction(radon):
+    with pytest.raises(ValueError):
+        attack.attack_objective(_rand(2, 1, IMG, IMG), _rand(2, 1, IMG, IMG), "mse",
+                                radon=radon, reduction="sum")
+
+
+def test_random_start_lies_in_the_feasible_set_and_uses_the_whole_ball():
+    """A random start must be in S = range(P) ∩ B_eps for every sample, and its
+    radius must scale with the budget rather than with the sinogram dimension."""
+    torch.manual_seed(0)
+    keep = torch.zeros(1, 1, 400, 1, dtype=torch.float64)
+    keep[..., :250, :] = 1.0                              # a coordinate projector
+    projector = lambda y: y * keep
+    y = torch.zeros(64, 1, 400, 1, dtype=torch.float64)
+    eps = torch.linspace(0.01, 5.0, 64, dtype=torch.float64)
+
+    d = attack.random_start(y, eps, projector)
+    norms = attack.l2_norm_batch(d)
+    assert torch.all(norms <= eps + 1e-12)
+    assert torch.allclose(projector(d), d)
+    frac = norms / eps
+    # radii spread over [0, eps] instead of all sitting at one radius
+    assert float(frac.min()) < 0.25 and float(frac.max()) > 0.75
+
+
+def test_pgd_keeps_the_best_restart_per_sample(radon, monkeypatch):
+    """Two restarts, each best for a different sample: both samples must keep
+    their own best. A batch-level choice hands both the same restart."""
+    adapter, _, _ = _clean_setup(radon)
+    y_clean = torch.zeros(2, 1, radon.LA_ROWS, 1, dtype=torch.float64)
+    v = _rand(1, 1, radon.LA_ROWS, 1)
+    v = v / attack.l2_norm_batch(v).view(-1, 1, 1, 1)
+    restart_a = torch.cat([10.0 * v, 1.0 * v])            # better for sample 0
+    restart_b = torch.cat([1.0 * v, 10.0 * v])            # better for sample 1
+    starts = iter([restart_a, restart_b])
+    monkeypatch.setattr(attack, "random_start", lambda *a, **k: next(starts))
+    monkeypatch.setattr(attack, "SUITE_STEPS", 0)          # the start is the result
+    monkeypatch.setattr(attack, "SUITE_RESTARTS", 2)
+
+    res = attack.pgd_attack(adapter, x_gt=torch.zeros(2, 1, IMG, IMG, dtype=torch.float64),
+                            y_clean=y_clean, clean_pred=None, eps=100.0, alpha=0.0,
+                            objective="mse")
+    assert torch.allclose(res.delta[0], restart_a[0])
+    assert torch.allclose(res.delta[1], restart_b[1])
+    assert torch.allclose(res.y_adv, y_clean + res.delta)
+
+
 # --------------------------------------------------------------------------- #
 # small reduction helpers
 # --------------------------------------------------------------------------- #
@@ -1432,7 +1489,7 @@ def test_dataloader_splits_train_and_test_disjointly(tmp_path):
     """Attacking on samples the model trained on would flatter every result."""
     from src.ellipse_dataloader import get_ellipse_dataloader
     root = _npy_dataset(tmp_path, n=6)
-    common = dict(batch_size=1, n_train=4, n_test=2,
+    common = dict(batch_size=1, n_train=4, n_val=0, n_test=2,
                   shuffle=False, num_workers=0, data_root=str(root))
     ids = {}
     for split in ("train", "test"):
@@ -1442,11 +1499,33 @@ def test_dataloader_splits_train_and_test_disjointly(tmp_path):
     assert not (set(ids["train"]) & set(ids["test"])), "train and test overlap"
 
 
+def test_dataloader_keeps_validation_apart_from_test(tmp_path):
+    """Checkpoint selection on the test set would bias every reported number."""
+    from src.ellipse_dataloader import get_ellipse_dataloader
+    root = _npy_dataset(tmp_path, n=6)
+    common = dict(batch_size=1, n_train=3, n_val=1, n_test=2,
+                  shuffle=False, num_workers=0, data_root=str(root))
+    ids = {split: [float(b[0].flatten()[0])
+                   for b in get_ellipse_dataloader(split=split, **common)]
+           for split in ("train", "val", "test")}
+    assert [len(ids[s]) for s in ("train", "val", "test")] == [3, 1, 2]
+    assert not (set(ids["val"]) & set(ids["test"])), "validation and test overlap"
+    assert not (set(ids["train"]) & (set(ids["val"]) | set(ids["test"])))
+
+
+def test_dataloader_rejects_a_split_past_the_end_of_the_data(tmp_path):
+    from src.ellipse_dataloader import get_ellipse_dataloader
+    root = _npy_dataset(tmp_path, n=6)
+    with pytest.raises(ValueError):
+        get_ellipse_dataloader(split="test", batch_size=1, n_train=4, n_val=1,
+                               n_test=2, num_workers=0, data_root=str(root))
+
+
 def test_dataloader_is_deterministic_without_shuffle(tmp_path):
     """The suite relies on every model seeing byte-identical inputs."""
     from src.ellipse_dataloader import get_ellipse_dataloader
     root = _npy_dataset(tmp_path, n=6)
-    kw = dict(batch_size=2, split="test", n_train=4, n_test=2,
+    kw = dict(batch_size=2, split="test", n_train=4, n_val=0, n_test=2,
               shuffle=False, num_workers=0, data_root=str(root))
     a = [float(b[0].flatten()[0]) for b in get_ellipse_dataloader(**kw)]
     b = [float(x.flatten()[0]) for x in
@@ -1769,3 +1848,94 @@ def test_ensure_dir_creates_nested(tmp_path):
     assert target.is_dir()
     # idempotent — calling again on an existing dir must not raise.
     utils.ensure_dir(target)
+
+
+# =========================================================================== #
+# Geometry cache — atomic publish and validated load. The prep stage runs the
+# noise levels as a concurrent Slurm array with one shared geometry, so several
+# tasks can miss the same cache key at once. These build a tiny adapter shell
+# by hand, so they need neither astra nor a GPU.
+# =========================================================================== #
+def _cache_shell(dtype=torch.float64):
+    pytest.importorskip("scipy")
+    from src.radon import MatrixRadonAdapter
+    r = object.__new__(MatrixRadonAdapter)
+    r.resolution, r.det_count, r.dx = 2, 2, 1.0
+    r.angles = np.array([0.0, 1.0], dtype=np.float64)
+    r.phi, r.svd_threshold = (0.0, 0.5), 0.1
+    r.device, r.dtype, r.dense = torch.device("cpu"), dtype, True
+    r._la_row_mask = np.array([True, True, False, False])
+    return r
+
+
+def _filled_cache_shell():
+    r = _cache_shell()
+    g = torch.Generator().manual_seed(0)
+    r._A = torch.randn(4, 4, generator=g, dtype=torch.float64)
+    r._A_la = r._A[:2].clone()
+    r._U_k_la = torch.randn(2, 2, generator=g, dtype=torch.float64)
+    r._s_k_la = torch.tensor([2.0, 1.0], dtype=torch.float64)
+    r._Vt_k_la = torch.randn(2, 4, generator=g, dtype=torch.float64)
+    return r
+
+
+def test_cache_round_trip_restores_the_factors(tmp_path):
+    src = _filled_cache_shell()
+    path = tmp_path / "key"
+    src._save_cache(path)
+    assert (path / src._CACHE_MARKER).exists()
+
+    dst = _cache_shell()
+    assert dst._try_load_cache(path)
+    for name in ("_A", "_A_la", "_U_k_la", "_s_k_la", "_Vt_k_la"):
+        assert torch.allclose(getattr(dst, name), getattr(src, name)), name
+
+
+def test_cache_publish_leaves_no_temporary_directories(tmp_path):
+    _filled_cache_shell()._save_cache(tmp_path / "key")
+    assert [q.name for q in tmp_path.iterdir()] == ["key"]
+
+
+def test_cache_publish_keeps_a_copy_published_concurrently(tmp_path):
+    """The second of two tasks racing for one key must keep the first copy and
+    not fail, since both were computed from the same inputs."""
+    path = tmp_path / "key"
+    first = _filled_cache_shell()
+    first._save_cache(path)
+    second = _filled_cache_shell()
+    second._s_k_la = torch.tensor([9.0, 9.0], dtype=torch.float64)
+    second._save_cache(path)                               # loses the race
+    reader = _cache_shell()
+    assert reader._try_load_cache(path)
+    assert torch.allclose(reader._s_k_la, first._s_k_la)
+    assert [q.name for q in tmp_path.iterdir()] == ["key"]
+
+
+def test_cache_without_marker_and_incomplete_is_discarded(tmp_path):
+    """What a writer killed mid-write used to leave behind: never a cache hit."""
+    path = tmp_path / "key"
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _filled_cache_shell()._write_cache_files(staging)
+    path.mkdir()
+    (staging / "A.npz").rename(path / "A.npz")               # A only
+    assert not _cache_shell()._try_load_cache(path)
+    assert not path.exists()
+
+
+def test_cache_without_marker_but_complete_is_adopted(tmp_path):
+    """Entries written before the marker existed are validated and kept."""
+    path = tmp_path / "key"
+    path.mkdir()
+    _filled_cache_shell()._write_cache_files(path)
+    assert _cache_shell()._try_load_cache(path)
+    assert (path / "COMPLETE").exists()
+
+
+def test_cache_with_non_finite_factors_is_rejected(tmp_path):
+    path = tmp_path / "key"
+    bad = _filled_cache_shell()
+    bad._Vt_k_la[0, 0] = float("nan")
+    path.mkdir()
+    bad._write_cache_files(path)
+    assert not _cache_shell()._try_load_cache(path)
