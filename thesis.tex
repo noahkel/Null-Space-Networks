@@ -1369,9 +1369,9 @@ residual network's is not, so an unrestricted estimate mostly measures the
 architectural constraint rather than what either network has learned. Measured on
 the subspace both are free to act in, the comparison is between the learned maps.\\
 The same power iteration is run with the projector replaced by
-$\mathbf{P}_{\mathcal{N}(\mathbf{A})^{\perp}}$ and by the identity, so that the
-claim is checked rather than assumed. The complement-restricted gain is zero for
-the Nullspace Network by construction, and its value for the residual network is
+$\mathbf{P}_{\mathcal{N}(\mathbf{A})^{\perp}}$ and by the identity.
+This gives more insight into the general behaviour of the residual network.
+The complement-restricted gain is zero for the Nullspace Network by construction, and its value for the residual network is
 precisely the part of an unrestricted comparison that would be architecture rather
 than learning. The unrestricted gain is the plain local Lipschitz constant of the
 learned correction, reported for completeness. Neither of the two is a robustness
