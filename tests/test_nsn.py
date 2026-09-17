@@ -1541,6 +1541,105 @@ def test_lipschitz_plot_renders(tmp_path):
     assert (tmp_path / "lipschitz_nullspace.png").exists()
 
 
+def test_lipschitz_plot_renders_every_restriction(tmp_path):
+    """The suite now writes one estimate per subspace; the old flat schema above
+    must keep rendering too, since it is what the finished runs on disk hold."""
+    V = _vis()
+    lip = {m: {r: {"mean": 0.6, "std": 0.1, "max": 0.8, "n": 4}
+               for r in ("null", "range", "full")}
+           for m in ("nsn", "resnet")}
+    lip["nsn"]["range"] = {"mean": 0.0, "std": 0.0, "max": 0.0, "n": 4}
+    V.save_lipschitz_plot(tmp_path, lip)
+    assert (tmp_path / "lipschitz_nullspace.png").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Lipschitz estimate — the restricted/unrestricted local gain of the learned
+# correction. A *linear* correction makes the power iteration checkable: the
+# Jacobian is the matrix itself, so the estimate must reproduce the largest
+# singular value of P M P for the projector it was handed.
+# --------------------------------------------------------------------------- #
+class _LinearCorrection(torch.nn.Module):
+    """f(x) = x + M x  (optionally with the correction pushed into null(A)),
+    so the learned correction g = f - x is exactly the linear map M."""
+
+    def __init__(self, radon, seed=3, project=False):
+        super().__init__()
+        rng = np.random.default_rng(seed)
+        self.M = torch.tensor(rng.standard_normal((radon.N, radon.N)) / np.sqrt(radon.N),
+                              dtype=torch.float64)
+        self.radon = radon
+        self.project = project
+
+    def forward(self, x):
+        b = x.shape[0]
+        g = (x.reshape(b, self.radon.N).to(torch.float64) @ self.M.T).reshape(x.shape)
+        if self.project:
+            g = self.radon.proj_null_image(g)
+        return x + g.to(x.dtype)
+
+
+def _projector_matrix(radon, restriction):
+    """The projector of ``restriction`` as a dense matrix, by applying it to the
+    standard basis — the same route the estimate takes, but explicit."""
+    proj = attack.image_projector(radon, restriction)
+    eye = torch.eye(radon.N, dtype=torch.float64).reshape(radon.N, 1, radon.IMG, radon.IMG)
+    return proj(eye).reshape(radon.N, radon.N).T
+
+
+@pytest.mark.parametrize("restriction", ["null", "range", "full"])
+def test_lipschitz_matches_the_projected_operator_norm(radon, restriction):
+    model = _LinearCorrection(radon)
+    P = _projector_matrix(radon, restriction).numpy()
+    expected = np.linalg.svd(P @ model.M.numpy() @ P, compute_uv=False)[0]
+
+    x_init = torch.randn(2, 1, radon.IMG, radon.IMG, dtype=torch.float64)
+    res = attack.estimate_lipschitz(
+        model=model, clean_cache=[(x_init, x_init)], radon=radon,
+        n_samples=2, n_iters=200,
+        proj=attack.image_projector(radon, restriction))
+
+    assert res["n"] == 2
+    assert res["mean"] == pytest.approx(expected, rel=1e-4)
+
+
+def test_lipschitz_defaults_to_the_null_restriction(radon):
+    """The unrestricted and range numbers are additions; the bare call must keep
+    meaning what every finished run's lipschitz.json means."""
+    model = _LinearCorrection(radon)
+    x_init = torch.randn(1, 1, radon.IMG, radon.IMG, dtype=torch.float64)
+    kw = dict(model=model, clean_cache=[(x_init, x_init)], radon=radon,
+              n_samples=1, n_iters=200)
+    assert attack.estimate_lipschitz(**kw)["mean"] == pytest.approx(
+        attack.estimate_lipschitz(proj=radon.proj_null_image, **kw)["mean"], rel=1e-9)
+
+
+def test_lipschitz_of_a_null_space_correction_vanishes_outside_the_null_space(radon):
+    """What the range-restricted estimate reports for the NSN: its correction is
+    identically zero on null(A)^perp, so the number is the architecture, not the
+    learned map."""
+    model = _LinearCorrection(radon, project=True)
+    x_init = torch.randn(2, 1, radon.IMG, radon.IMG, dtype=torch.float64)
+    kw = dict(model=model, clean_cache=[(x_init, x_init)], radon=radon,
+              n_samples=2, n_iters=100)
+    gains = {r: attack.estimate_lipschitz(proj=attack.image_projector(radon, r), **kw)["mean"]
+             for r in ("null", "range", "full")}
+    assert gains["range"] < 1e-9
+    assert gains["null"] > 1e-3
+    # unrestricted: P M P with P = I still sees the null-space output, so it is
+    # bounded below by the null-restricted gain rather than being zero.
+    assert gains["full"] >= gains["null"] - 1e-6
+
+
+def test_lipschitz_restrictions_are_parsed_in_a_fixed_order(radon):
+    assert attack.parse_lipschitz_restrictions("full, null,null") == ["null", "full"]
+    assert attack.parse_lipschitz_restrictions("null") == ["null"]
+    with pytest.raises(ValueError):
+        attack.parse_lipschitz_restrictions("null,sideways")
+    with pytest.raises(ValueError):
+        attack.image_projector(radon, "sideways")
+
+
 # =========================================================================== #
 # Radon operator — MatrixRadonAdapter identities. A tiny synthetic
 # limited-angle operator, built on the spot: no data directory, summary.json or

@@ -43,6 +43,10 @@ EPOCH_STUDY_MAX=${EPOCH_STUDY_MAX:-32}
 CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-1}
 LIPSCHITZ_SAMPLES=${LIPSCHITZ_SAMPLES:-32}
 LIPSCHITZ_ITERS=${LIPSCHITZ_ITERS:-16}
+# Subspaces the local gain is estimated in: null, range (= null-complement) and
+# unrestricted. Each costs a full pass of power iterations; set to "null" alone
+# for the comparable number only.
+LIPSCHITZ_RESTRICTIONS=${LIPSCHITZ_RESTRICTIONS:-null,range,full}
 
 # Stage toggles
 RUN_TESTS=${RUN_TESTS:-1}
@@ -109,6 +113,7 @@ banner "attack suite"
 python -u attack.py --data-root "$DATA_DIR" --model-dir "$MODEL_DIR" \
     --max-samples "$MAX_SAMPLES" --lipschitz \
     --lipschitz-samples "$LIPSCHITZ_SAMPLES" --lipschitz-iters "$LIPSCHITZ_ITERS" \
+    --lipschitz-restrictions "$LIPSCHITZ_RESTRICTIONS" \
     --out-dir "$OUT_DIR"
 
 # Writes epoch_study/*.csv into the same run dir, so it runs before rendering.

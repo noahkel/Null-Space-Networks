@@ -657,32 +657,80 @@ def summarize_metrics(rows: List[Dict[str, float]]) -> Dict[str, float]:
 
     return metrics
 
+# Subspace the local gain is measured in. "null" restricts both the input and
+# the output of the linearised correction to N(A_la) — the channel both
+# architectures are free to act in, and so the only one in which the number
+# compares the *learned* maps rather than the architectures. "range" restricts
+# them to the orthogonal complement N(A_la)^perp, where the NSN's correction is
+# identically zero by construction. "full" leaves the correction unrestricted,
+# which is the plain local Lipschitz constant of the learned correction.
+LIPSCHITZ_RESTRICTIONS = ("null", "range", "full")
+
+
+def image_projector(radon, restriction: str) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Image-space projector for one of ``LIPSCHITZ_RESTRICTIONS``.
+
+    The range projector is built as I - P_null rather than from the SVD factors
+    directly, so the two are exactly complementary (P_ran + P_null = I to
+    floating point) and the two restricted estimates cannot silently disagree
+    about where the split lies.
+    """
+    if restriction == "null":
+        return radon.proj_null_image
+    if restriction == "range":
+        return lambda v: v - radon.proj_null_image(v)
+    if restriction == "full":
+        return lambda v: v
+    raise ValueError(f"unknown Lipschitz restriction {restriction!r}, "
+                     f"expected one of {LIPSCHITZ_RESTRICTIONS}")
+
+
+def parse_lipschitz_restrictions(spec: str) -> List[str]:
+    """Parse a comma-separated ``--lipschitz-restrictions`` spec, preserving the
+    order of ``LIPSCHITZ_RESTRICTIONS`` and dropping duplicates."""
+    wanted = [token.strip() for token in spec.split(",") if token.strip()]
+    unknown = [token for token in wanted if token not in LIPSCHITZ_RESTRICTIONS]
+    if unknown:
+        raise ValueError(f"unknown Lipschitz restriction(s) {unknown}, "
+                         f"expected any of {list(LIPSCHITZ_RESTRICTIONS)}")
+    return [r for r in LIPSCHITZ_RESTRICTIONS if r in wanted]
+
+
 def estimate_lipschitz(
     model: nn.Module,
     clean_cache: List[Tuple],
     radon,
     n_samples: int,
     n_iters: int,
+    proj: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
 ) -> Dict[str, float]:
-    """Operator-norm (local Lipschitz) estimate of the *learned correction*
-    restricted to the null space of A_la.
+    """Operator-norm (local Lipschitz) estimate of the *learned correction*,
+    restricted to whichever subspace ``proj`` projects onto.
 
     Linearise the correction  g(x) = f(x) - x  (= P_null(UNet(x)) for the NSN,
     UNet(x) for the ResNet) around the clean init x0, restrict both input and
-    output to null(A_la) with the same projector P = radon.proj_null_image, and
-    estimate the largest singular value of  M = P . J_g . P  by power iteration:
+    output with the same projector P = ``proj``, and estimate the largest
+    singular value of  M = P . J_g . P  by power iteration:
 
         d <- P d / ||.|| ;   repeat:  u = M d ,  d = M^T u / ||.|| ;   sigma ~ ||M d||.
 
-    Attack-independent and architecture-comparable: it measures how strongly a
-    null-space input perturbation can be amplified into null-space output error,
-    which is what governs worst-case robustness of the learned channel.
+    Attack-independent: it measures how strongly an input perturbation in that
+    subspace can be amplified into output error in the same subspace, which is
+    what governs worst-case robustness of the learned channel there.
+
+    ``proj`` defaults to ``radon.proj_null_image``, the null-restricted gain.
+    That is the architecture-comparable one: with the identity projector
+    (``image_projector(radon, "full")``) the estimate is dominated by the fact
+    that the NSN's correction is zero on N(A_la)^perp while the ResNet's is not,
+    so it mostly reports the architectural constraint rather than what either
+    network has learned; with the range projector it reports that constraint
+    alone, and is zero for the NSN by construction.
 
     ``clean_cache`` entries only need to supply (x_gt, x_init, ...) as their
     first two elements. ``n_samples`` clean reconstructions are linearised and
     ``n_iters`` power iterations are run at each.
     """
-    proj = radon.proj_null_image
+    proj = radon.proj_null_image if proj is None else proj
     samples: List[float] = []
 
     for entry in clean_cache:
@@ -693,7 +741,7 @@ def estimate_lipschitz(
             x0 = x_init[b: b + 1].detach()
 
             def G(x: torch.Tensor) -> torch.Tensor:
-                # learned correction, output restricted to the null space
+                # learned correction, output restricted to the chosen subspace
                 return proj(model(x) - x)
             d = proj(torch.randn_like(x0))
             d = d / (torch.linalg.norm(d.reshape(-1)) + 1e-12)
@@ -1104,14 +1152,20 @@ def run_suite(args, radon, summary: Dict,
             eps=eps_nominal, T=T, n_ex=n_ex, gt_stack=gt_stack, recon=recon)
 
     
-    lip_res: Dict[str, Dict[str, float]] = {}
+    # One estimate per model per subspace: the null-restricted gain is the
+    # comparable one, the other two say how much of it is the architecture.
+    restrictions = parse_lipschitz_restrictions(args.lipschitz_restrictions)
+    lip_res: Dict[str, Dict[str, Dict[str, float]]] = {}
     for name in model_names:
-        lip_res[name] = estimate_lipschitz(
-            model=models[name], clean_cache=input_cache, radon=radon,
-            n_samples=args.lipschitz_samples, n_iters=args.lipschitz_iters)
-        r = lip_res[name]
-        print(f"[suite][lipschitz] {name} mean={r['mean']:.4g} "
-              f"max={r['max']:.4g} (n={r['n']})")
+        lip_res[name] = {}
+        for restriction in restrictions:
+            r = estimate_lipschitz(
+                model=models[name], clean_cache=input_cache, radon=radon,
+                n_samples=args.lipschitz_samples, n_iters=args.lipschitz_iters,
+                proj=image_projector(radon, restriction))
+            lip_res[name][restriction] = r
+            print(f"[suite][lipschitz] {name} [{restriction}] mean={r['mean']:.4g} "
+                  f"max={r['max']:.4g} (n={r['n']})")
     if lip_res:
         # Plotted later by visualise.render_tree from this json.
         with open(out_root / "lipschitz.json", "w", encoding="utf-8") as f:
@@ -1422,14 +1476,28 @@ def parse():
                              "model writes its own epoch_study/pinv_<model>.csv, so one "
                              "model per Slurm array task parallelises the study cleanly.")
     parser.add_argument("--lipschitz", action="store_true",
-                        help="(Always on.) Estimate the null-restricted local Lipschitz constant "
-                             "of each model's learned correction (attack-independent robustness "
+                        help="(Always on.) Estimate the local Lipschitz constant of each "
+                             "model's learned correction (attack-independent robustness "
                              "measure).")
     parser.add_argument("--lipschitz-samples", type=int, default=32,
-                        help="Clean reconstructions the null-restricted gain is averaged over.")
+                        help="Clean reconstructions each gain is averaged over.")
     parser.add_argument("--lipschitz-iters", type=int, default=16,
-                        help="Power iterations per sample for the null-restricted gain.")
-    return parser.parse_args()
+                        help="Power iterations per sample for each gain.")
+    parser.add_argument("--lipschitz-restrictions",
+                        default=",".join(LIPSCHITZ_RESTRICTIONS),
+                        help="Comma-separated subspaces to restrict the gain to, any of "
+                             f"{', '.join(LIPSCHITZ_RESTRICTIONS)}. 'null' is the "
+                             "architecture-comparable number, 'range' and 'full' say how "
+                             "much of the comparison is the architecture rather than the "
+                             "learned map. Each one costs a full pass of power iterations.")
+    args = parser.parse_args()
+    # Validated here rather than at the Lipschitz stage: that stage runs after
+    # hours of attacking, and a typo there would throw the run away.
+    try:
+        parse_lipschitz_restrictions(args.lipschitz_restrictions)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def main() -> None:

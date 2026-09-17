@@ -507,25 +507,57 @@ def save_consistency_plot(
     plt.close(fig)
 
 
-def save_lipschitz_plot(out_dir: Path, lip_res: Dict[str, Dict[str, float]]) -> None:
-    """bar chart: null-restricted local Lipschitz constant per model (mean +/- std,
-    max marked). Higher => the learned channel amplifies null-space perturbations more,
-    i.e. is intrinsically less robust there - independent of any particular attack."""
-    models = [m for m in lip_res if lip_res[m].get("n", 0) > 0]
+# Subspace the local gain was restricted to -> (legend label, bar colour).
+# The order here is the order the bars appear in, not the order of the json.
+_LIPSCHITZ_RESTRICTIONS = {
+    "null":  ("null: ||P_N . J_g . P_N||", "#4C72B0"),
+    "range": ("range: ||P_R . J_g . P_R||", "#55A868"),
+    "full":  ("unrestricted: ||J_g||", "#8172B2"),
+}
+
+
+def _lipschitz_by_restriction(entry: Dict) -> Dict[str, Dict[str, float]]:
+    """Accept both the nested schema the attack suite writes
+    ({restriction: {mean, std, max, n}}) and the older flat one
+    ({mean, std, max, n}), which was always the null-restricted gain."""
+    if "mean" in entry:
+        return {"null": entry}
+    return {k: v for k, v in entry.items() if k in _LIPSCHITZ_RESTRICTIONS}
+
+
+def save_lipschitz_plot(out_dir: Path, lip_res: Dict[str, Dict]) -> None:
+    """grouped bar chart: local Lipschitz constant of the learned correction per
+    model (mean +/- std, max marked), one bar per subspace the gain was restricted
+    to. Higher => the learned channel amplifies perturbations in that subspace more,
+    i.e. is intrinsically less robust there - independent of any particular attack.
+    Only the null-restricted bars compare the learned maps: both architectures are
+    free to act in null(A), whereas on its complement the NSN's correction is zero
+    by construction, so the range and unrestricted bars largely report that
+    architectural constraint instead."""
+    per_model = {m: _lipschitz_by_restriction(e) for m, e in lip_res.items()}
+    models = [m for m in per_model
+              if any(r.get("n", 0) > 0 for r in per_model[m].values())]
     if not models:
         return
-    means = [lip_res[m]["mean"] for m in models]
-    stds = [lip_res[m]["std"] for m in models]
-    maxes = [lip_res[m]["max"] for m in models]
+    shown = [k for k in _LIPSCHITZ_RESTRICTIONS
+             if any(per_model[m].get(k, {}).get("n", 0) > 0 for m in models)]
     x = np.arange(len(models))
-    fig, ax = plt.subplots(figsize=(1.6 * len(models) + 3, 5))
-    ax.bar(x, means, 0.5, yerr=stds, capsize=4, color="#4C72B0", label="mean +/- std")
-    ax.scatter(x, maxes, color="#C44E52", zorder=3, label="max")
+    width = 0.8 / len(shown)
+    fig, ax = plt.subplots(figsize=(1.1 * len(models) * len(shown) + 2, 5))
+    for i, key in enumerate(shown):
+        label, colour = _LIPSCHITZ_RESTRICTIONS[key]
+        stats = [per_model[m].get(key, {}) for m in models]
+        offset = (i - (len(shown) - 1) / 2) * width
+        ax.bar(x + offset, [s.get("mean", 0.0) for s in stats], width,
+               yerr=[s.get("std", 0.0) for s in stats], capsize=4,
+               color=colour, label=f"{label} (mean +/- std)")
+        ax.scatter(x + offset, [s.get("max", np.nan) for s in stats],
+                   color="#C44E52", zorder=3, label="max" if i == 0 else None)
     ax.set_xticks(x)
     ax.set_xticklabels(models)
-    ax.set_ylabel("||P.J_g.P||  (null-restricted local Lipschitz)")
-    ax.set_title("null-restricted Lipschitz of the learned correction%s\n"
-                 "operator norm of P_null . J(f-x) . P_null (power iteration)"
+    ax.set_ylabel("local Lipschitz of the learned correction g = f - x")
+    ax.set_title("local Lipschitz of the learned correction%s\n"
+                 "operator norm of P . J(f-x) . P per subspace (power iteration)"
                  % _init_tag(), fontsize=9)
     ax.legend(fontsize=8)
     ax.grid(True, axis="y", alpha=0.3)
@@ -1120,9 +1152,13 @@ def render_init(init_dir: Path, on_step=None) -> None:
         save_attack_comparison_scatter(init_dir, all_rows, eps_seen)
         save_consistency_overview(init_dir, all_rows, eps_seen)
 
-    lip_json = init_dir / "lipschitz_nullspace.json"
-    if lip_json.exists():
-        save_lipschitz_plot(init_dir, json.loads(lip_json.read_text(encoding="utf-8")))
+    # attack.py writes lipschitz.json; lipschitz_nullspace.json is the name older
+    # runs used, kept so their trees still render.
+    for lip_name in ("lipschitz.json", "lipschitz_nullspace.json"):
+        lip_json = init_dir / lip_name
+        if lip_json.exists():
+            save_lipschitz_plot(init_dir, json.loads(lip_json.read_text(encoding="utf-8")))
+            break
 
     print(f"[visualise] rendered figures for {init_dir}")
 

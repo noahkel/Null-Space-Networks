@@ -1319,11 +1319,6 @@ For the residual network the first residual is free to grow, since nothing in it
 ties its correction to the measured data, and the second then differs from the first by at most
 $\varepsilon$ in either direction.\\
 \subsection{Lipschitz Study}
-% TODO (code): the estimate below is computed only on N(A).  Adding the unrestricted
-% estimate and the one restricted to N(A)^perp would need a variant of
-% estimate_lipschitz() in src/attack.py taking the projector as an argument, and a
-% rerun of the attack suite; the paragraph after the listing says what the two extra
-% numbers would and would not show.
 Finally, an attack-independent robustness measure is computed. Every number
 above is the outcome of one particular attack, so none of them can distinguish a
 robust model from one the attack merely failed to find a direction for. Write
@@ -1345,8 +1340,10 @@ power-iteration step needs $\mathbf{T}\mathbf{d}$ and
 $\mathbf{T}^{*}\mathbf{u}$, which are exactly a Jacobian-vector and a
 vector-Jacobian product of $g$ with a projection on each side, and PyTorch
 supplies both directly:
-\begin{lstlisting}[language=Python, caption=One power iteration of the null-restricted gain]
-def G(x):                      # learned correction, restricted to N(A)
+\begin{lstlisting}[language=Python, caption=One power iteration of the restricted gain]
+proj = image_projector(radon, restriction)   # N(A), its complement, or identity
+
+def G(x):                      # learned correction, restricted by proj
     return proj(model(x) - x)
 
 d = proj(torch.randn_like(x0))
@@ -1368,10 +1365,18 @@ there. And it is restricted: input and output are both confined to
 $\mathcal{N}(\mathbf{A})$. That restriction is what makes the number comparable
 between the two architectures at all. Unrestricted, the Nullspace Network's
 correction is identically zero on $\mathcal{N}(\mathbf{A})^{\perp}$ while the
-residual network's is not, so an unrestricted estimate would mostly measure the
+residual network's is not, so an unrestricted estimate mostly measures the
 architectural constraint rather than what either network has learned. Measured on
-the subspace both are free to act in, the comparison is between the learned maps.
-The estimate is averaged over several clean initial reconstructions, and the
+the subspace both are free to act in, the comparison is between the learned maps.\\
+The same power iteration is run with the projector replaced by
+$\mathbf{P}_{\mathcal{N}(\mathbf{A})^{\perp}}$ and by the identity, so that the
+claim is checked rather than assumed. The complement-restricted gain is zero for
+the Nullspace Network by construction, and its value for the residual network is
+precisely the part of an unrestricted comparison that would be architecture rather
+than learning. The unrestricted gain is the plain local Lipschitz constant of the
+learned correction, reported for completeness. Neither of the two is a robustness
+comparison between the architectures; only the null-restricted number is.
+All three are averaged over several clean initial reconstructions, and the
 maximum over them is reported alongside the mean.
 
 \subsection{Experimental pipeline}
