@@ -17,7 +17,7 @@ operator. `thesis.tex` is the write-up; this file is how to run it.
 | `src/attack.py` (entry: `attack.py`) | PGD attack suite, epoch study, metrics, Lipschitz estimate |
 | `src/visualisations.py` (entry: `visualise.py`) | every figure, rebuilt from saved artifacts only |
 | `slurm_full_run.sh` | the full experiment for one noise level as one Slurm job |
-| `truncation_study.py`, `slurm_truncation_study.sh` | the one-off study behind using a single truncation throughout |
+| `truncation_study.py`, `slurm_truncation_study.sh` | two one-off studies about τ: which operator draws the noise (`--mode noise`) and how much the channel split depends on where τ was put (`--mode tau`) |
 | `tests/test_nsn.py` | the test suite |
 
 ## Running
@@ -30,7 +30,12 @@ training, attack suite, epoch study, figures; a failing stage aborts):
 ```bash
 sbatch --export=ALL,NOISE=0.01 slurm_full_run.sh
 sbatch --export=ALL,NOISE=0.01,CREATE_DATA=0,TRAIN=0 slurm_full_run.sh   # reuse data and models
+sbatch --export=ALL,NOISE=0.01,SVD_THRESH=1e-3 slurm_full_run.sh         # a second truncation
 ```
+
+A second truncation writes to its own data, model and output directories
+(`..._tau1e-3`), so it never overwrites the main experiment. τ is baked into the
+data, so `CREATE_DATA=0` cannot be combined with a new one.
 
 The stages by hand, for one noise level:
 
@@ -50,7 +55,15 @@ python visualise.py attacks_n0.01
   data-consistency residual all use the operator truncated at τ = 4·10⁻³.
   Drawing the noise from a second, untruncated operator delivered only 82 % of
   the nominal noise to the reconstruction while the attack budget was fully
-  effective; `truncation_study.py` measures this.
+  effective; `truncation_study.py --mode noise` measures this.
+- **τ fixes the channel split.** Every per-channel number - the range floor, the
+  null-space error, the null-restricted attack - is stated on the numerical null
+  space at τ. `truncation_study.py --mode tau` sweeps thresholds on one
+  decomposition (the truncations are nested, so each τ is a prefix of the
+  factors) and reports how far the boundary moves, how much of the null-space
+  error a different τ would reclassify as measured, and how much of it lies
+  outside range(A) where no τ reaches it. It also names two candidate
+  thresholds for a confirming run.
 - **Single precision, dense layout** in every stage. The geometry cache under
   `radon_cache/` is keyed on the geometry, τ and the dtype, and is shared by all
   stages.

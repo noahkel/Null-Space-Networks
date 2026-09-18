@@ -5,6 +5,10 @@
 \usepackage{nicematrix}
 \usepackage{listings}
 \usepackage{etoolbox}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
 
 % every \section starts on a fresh page
 \pretocmd{\section}{\clearpage}{}{}
@@ -90,7 +94,7 @@ $$\mathcal{R}f(\theta,s):=\int_\mathbb{R}f(s\omega_\theta + t\omega_\theta^\perp
 It is easy to see, that this is a linear operator. Under the assumption that $\Omega$ is expressible as a finite pixel-basis and that we only make $m\in\mathbb{N}$ measurements $(\theta_i, s_i) \quad i\in\{1,...,m\}$, we can use a Matrix to model the x-ray measurement process. Assigning each pixel a number from $1$ to $n$ allows us to define our function $f(x)=\sum_jc_j\varphi_j(x)=\sum_jc_j\mathds{1}_j(x) \quad x\in\{1,...,n\} $ as a finite sum of weighted basis functions. These weights can be grouped into one vector $c \in\mathbb{R}^n$. Now applying the Radon transform and using linearity gives us for the measurement $y_i$ corresponding to $(\theta_i,s_i)$ the following equation.$$y_i = \mathcal{R}f(\theta_i,s_i) = \sum_jc_j\mathcal{R}\varphi_j(\theta_i,s_i)=\sum_jc_j\mathbf{A}_{ij}=e_i^T\mathbf{A}c$$
 Aggregating every measurement into one row we receive the linear equation with $\mathbf{A}$ defined by $\mathbf{A}_{ij}:=\mathcal{R}\varphi_j(\theta_i,s_i)$. $$y=\mathbf{A}c$$
 The parameters of the Radon transform $\theta$ and $s$, together with the choice of basis functions, uniquely define $\mathbf{A}\in\mathbb{R}^{m\times n}$.\\
-This simplifies the implementation and allows us to use the pseudoinverse $\mathbf{A}^{+}$ to get a reconstruction of the original image. Due to a large requirement of memory and computational power, this approach is not being used in clinical CT. Images in clinical CT require $512 \times 512$ pixels and low-dose clinical CT works with $700-900$ detector elements and about $1000$ projections per $360^\circ$ slice, which corresponds to $500$ projections per $180^\circ$. In this way we obtain a Matrix of size $ 350\,000\times262\,144$ \parencite{Flohr2013}. Singular value decompositions of matrices of this size take a long time and are therefore not feasible in clinical CT. In this laboratory setting however, our matrix is smaller and using it, simplifies concepts like null space and its complement. This will also be of importance, when we talk about Nullspace Networks and error decomposition in null space and null space complement.\\
+This simplifies the implementation and allows us to use the pseudoinverse $\mathbf{A}^{+}$ to get a reconstruction of the original image. Due to a large requirement of memory and computational power, this approach is not being used in clinical CT. Images in clinical CT require $512 \times 512$ pixels and low-dose clinical CT works with $700-900$ detector elements and about $1000$ projections per $360^\circ$ slice, which corresponds to $500$ projections per $180^\circ$. In this way we obtain a Matrix of size $ 350\,000\times262\,144$ \parencite{Flohr2013}. Singular value decompositions of matrices of this size take a long time and are therefore not feasible in clinical CT. In this laboratory setting however, our matrix is smaller and using it, simplifies concepts like null space and its complement. This will also be of importance, when we talk about Nullspace Networks and error decomposition into the null space and its complement.\\
 The construction of the Pseudoinverse is done using the singular value decomposition. It is a useful tool that generalizes the eigenvalue decomposition to non square matrices. A general matrix $\mathbf{A}\in\mathbb{R}^{m\times n}$ can be written in the following way:
 $$\mathbf{A}=\mathbf{U}\Sigma\mathbf{V}^*$$
 Where $\mathbf{U}\in\mathbb{R}^{m\times m}$ and $\mathbf{V}\in\mathbb{R}^{n\times n}$ are orthogonal matrices and $\Sigma\in\mathbb{R}^{m\times n}$ is a diagonal matrix carrying $r$ positive real numbers $\sigma_i$ on its diagonal, where $r$ is the rank of $\mathbf{A}$.
@@ -1318,7 +1322,7 @@ $$\frac{\lVert\mathbf{P}_k\mathbf{A}\hat{\mathbf{x}}-\mathbf{P}_k\mathbf{y}^\del
 For the residual network the first residual is free to grow, since nothing in its architecture
 ties its correction to the measured data, and the second then differs from the first by at most
 $\varepsilon$ in either direction.\\
-\subsection{Lipschitz Study}
+\subsection{Lipschitz Study}\label{sec:lipschitz}
 Finally, an attack-independent robustness measure is computed. Every number
 above is the outcome of one particular attack, so none of them can distinguish a
 robust model from one the attack merely failed to find a direction for. Write

@@ -7,6 +7,14 @@
 #   sbatch --export=ALL,NOISE=0.02 slurm_full_run.sh
 #   sbatch --export=ALL,NOISE=0.02,CREATE_DATA=0,TRAIN=0 slurm_full_run.sh
 #
+# A second truncation, to test whether a channel-restricted result depends on
+# where tau was put (see truncation_study.py --mode tau for choosing the value):
+#
+#   sbatch --export=ALL,NOISE=0.01,SVD_THRESH=1e-3 slurm_full_run.sh
+#
+# Anything other than the default tau writes to its own data, model and output
+# directories, so a second truncation never overwrites the main experiment.
+#
 # A failing stage aborts the job: every later stage consumes its output.
 #
 #SBATCH --job-name=nsn-full
@@ -30,11 +38,23 @@ NUM_THETAS=${NUM_THETAS:-180}
 N_SAMPLES=${N_SAMPLES:-5000}
 MODELS=${MODELS:-resnet,nsn}
 
+# The truncation of the operator. It is baked into the data (the noise is drawn
+# through this operator's range projector) and into summary.json, from where
+# train.py and attack.py read it, so a new value means regenerating the data.
+SVD_THRESH=${SVD_THRESH:-4e-3}
+DEFAULT_SVD_THRESH=4e-3
+# The default keeps the paths it has always had; any other tau gets its own
+# tree, so the two never share data, checkpoints or results. The tag is the
+# string as written, so spell a value the same way across runs: SVD_THRESH=1e-3
+# and SVD_THRESH=0.001 are the same threshold but two directories.
+if [ "$SVD_THRESH" = "$DEFAULT_SVD_THRESH" ]; then TAU_TAG=""; else TAU_TAG="_tau${SVD_THRESH}"; fi
+
 DATA_BASE=${DATA_BASE:-/scratch/noah/data_matrices}
 MODEL_BASE=${MODEL_BASE:-/scratch/noah/models_matrices}
-DATA_DIR=$DATA_BASE/$NOISE
-MODEL_DIR=$MODEL_BASE/$NOISE
-OUT_DIR=${OUT_DIR:-attacks_n${NOISE}_l2}
+DATA_ROOT=${DATA_BASE}${TAU_TAG}
+DATA_DIR=$DATA_ROOT/$NOISE
+MODEL_DIR=${MODEL_BASE}${TAU_TAG}/$NOISE
+OUT_DIR=${OUT_DIR:-attacks_n${NOISE}${TAU_TAG}_l2}
 
 # Attack budgets. eps is scaled per sample by ||y_i|| inside attack.py and
 # defaults to the training noise level, so no eps is passed here.
@@ -72,6 +92,7 @@ echo "Working dir:   $(pwd)"
 echo "Commit:        $(git rev-parse --short HEAD 2>/dev/null || echo '?')$(
                       test -n "$(git status --porcelain 2>/dev/null)" && echo ' (DIRTY)')"
 echo "Noise:         $NOISE"
+echo "Truncation:    tau = $SVD_THRESH"
 echo "Data:          $DATA_DIR"
 echo "Models:        $MODEL_DIR"
 echo "Output:        $OUT_DIR"
@@ -93,7 +114,7 @@ if [ "$CREATE_DATA" -eq 1 ]; then
     banner "data generation"
     python -u -m src.create_phantom_data --img_size "$IMG_SIZE" --noise "$NOISE" \
         --min_angle "$MIN_ANGLE" --max_angle "$MAX_ANGLE" --num_thetas "$NUM_THETAS" \
-        --n_samples "$N_SAMPLES" --out_dir "$DATA_BASE"
+        --n_samples "$N_SAMPLES" --svd_thresh "$SVD_THRESH" --out_dir "$DATA_ROOT"
 fi
 
 if [ ! -f "$DATA_DIR/summary.json" ]; then
