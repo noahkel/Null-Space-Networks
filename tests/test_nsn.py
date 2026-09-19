@@ -16,6 +16,8 @@ Covers, in order:
                              and the FBP filter construction
   11. numeric helpers        the image-quality metrics in src/utils.py
   12. source hygiene         invariants the architecture depends on
+  13. truncation study       src/truncation.py against the pipeline's projectors,
+                             and the seeded phantom families
 
 Every test is deterministic and needs no data directory, trained checkpoint or
 GPU. Gated with importorskip so it skips cleanly wherever torch / astra / scipy
@@ -2073,3 +2075,153 @@ def test_cache_key_has_moved_off_the_float32_decomposed_entry():
     r.angles = np.linspace(0, 180, 180, endpoint=False) * np.pi / 180
     r.phi, r.svd_threshold = (0.0, 120 * np.pi / 180), 4e-3
     assert r._cache_key() != "2db6c489633fde34"
+
+
+# =========================================================================== #
+# 13. Truncation study - src/truncation.py. Its numbers come from cumulative
+# sums over one full decomposition; these tests pin the formulas to the
+# pipeline's own projectors and the choices it makes to brute force.
+# =========================================================================== #
+@pytest.fixture(scope="module")
+def matrix_full():
+    """The fixture geometry decomposed in full, as the truncation study uses it."""
+    pytest.importorskip("astra")
+    pytest.importorskip("scipy")
+    from src.radon import MatrixRadonAdapter
+    from src.truncation import FULL_TAU
+    return MatrixRadonAdapter(
+        resolution=_RES, angles=_fixture_angles(), det_count=_DET, phi=_PHI,
+        svd_threshold=FULL_TAU, dx=1.0, estimate_norm=False,
+        device=torch.device("cpu"), dtype=torch.float64, cache_dir=None,
+    )
+
+
+def _study_inputs(radon, n_samples=3, seed=0):
+    """Phantoms (S, 1, H, W) and the noise run_study draws for them."""
+    g = torch.Generator().manual_seed(123)
+    x = make_phantom(_RES, torch.device("cpu"), torch.float64).repeat(n_samples, 1, 1, 1)
+    x = x + 0.2 * torch.rand(x.shape, generator=g, dtype=torch.float64)
+    gen = torch.Generator(device=radon.device).manual_seed(seed)
+    noise = torch.randn(n_samples, 1, len(radon.angles), radon.det_count,
+                        generator=gen, device=radon.device, dtype=radon.dtype)
+    return x, noise
+
+
+@pytest.mark.parametrize("sigma", [0.0, 0.01, 0.05])
+def test_truncation_error_formulas_match_the_pipeline(matrix_full, sigma):
+    """||e_N||^2 and ||e_R||^2 from the cumulative sums equal the pseudoinverse
+    error the pipeline's own operators produce, noise drawn as
+    create_phantom_data draws it."""
+    from src.truncation import Errors, coefficients, k_for_tau, truncated_to
+    x, noise = _study_inputs(matrix_full)
+    err = Errors(coefficients(matrix_full, x, noise), n=_RES ** 2)
+    s = matrix_full._s_k_la.numpy()
+    for tau in (1e-3, 4e-3, 2e-2):
+        k = k_for_tau(s, tau)
+        for i in range(x.shape[0]):
+            with truncated_to(matrix_full, k) as r:
+                y = r.forward_la(x[i:i + 1])
+                eta = r.proj_ran(noise[i:i + 1])
+                eta = sigma * (torch.linalg.norm(y) / torch.linalg.norm(eta)) * eta
+                e_ran, e_nul = r.decompose_error(r.backward_la(y + eta) - x[i:i + 1])
+            ks = np.array([k])
+            assert float((e_nul ** 2).sum()) == pytest.approx(err.null2(ks)[i, 0], rel=1e-8)
+            assert float((e_ran ** 2).sum()) == pytest.approx(
+                err.range2(ks, sigma)[i, 0], rel=1e-8, abs=1e-20)
+
+
+def test_truncation_optimum_and_candidates_match_brute_force(matrix_full):
+    """The optimum is the smallest mean rel-L2 of the pseudoinverse, measured
+    here with the pipeline's operators and metric; the candidates are the taus
+    whose dim N(A) is closest to half and to twice the reference."""
+    from src.truncation import k_for_tau, nice_taus, run_study, truncated_to
+    x, noise = _study_inputs(matrix_full, n_samples=4)
+    res = run_study(matrix_full, x, noises=[0.01, 0.05], tau_ref=4e-3, run_noise=0.01)
+    s, n = matrix_full._s_k_la.numpy(), _RES ** 2
+
+    def mean_rel_l2(tau, sigma):
+        vals = []
+        with truncated_to(matrix_full, k_for_tau(s, tau)) as r:
+            for i in range(x.shape[0]):
+                y = r.forward_la(x[i:i + 1])
+                eta = r.proj_ran(noise[i:i + 1])
+                eta = sigma * (torch.linalg.norm(y) / torch.linalg.norm(eta)) * eta
+                x_init = r.backward_la(y + eta)
+                vals.append(utils.rel_l2_np(x_init.squeeze().numpy(), x[i, 0].numpy()))
+        return float(np.mean(vals))
+
+    grid = nice_taus()
+    for sigma in (0.01, 0.05):
+        best = res["optimal"][f"{sigma:g}"]
+        assert best["rel_l2"]["mean"] == pytest.approx(mean_rel_l2(best["tau"], sigma), rel=1e-9)
+        assert best["rel_l2"]["mean"] <= min(mean_rel_l2(t, sigma) for t in grid[::7]) + 1e-12
+
+    dim_ref = res["dims"]["dim_null_ref"]
+    dims = [n - k_for_tau(s, t) for t in grid]
+    for name, factor in (("half_null", 0.5), ("double_null", 2.0)):
+        got = res["candidates"][name]["dim_null"]
+        assert abs(got - factor * dim_ref) == min(abs(d - factor * dim_ref) for d in dims)
+    assert res["recommended"]["tau"] == res["optimal"]["0.01"]["tau"]
+    assert res["cross_check"]["rel_diff"] < 1e-8
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_k_for_tau_matches_an_adapter_built_at_that_tau(dtype):
+    """Slicing the full decomposition at k_for_tau gives the rank an adapter at
+    that tau retains, in the pipeline's float32 as well."""
+    pytest.importorskip("astra")
+    from src.radon import MatrixRadonAdapter
+    from src.truncation import FULL_TAU, k_for_tau
+    kw = dict(resolution=_RES, angles=_fixture_angles(), det_count=_DET, phi=_PHI,
+              dx=1.0, estimate_norm=False, device=torch.device("cpu"), dtype=dtype,
+              dense=True, cache_dir=None)
+    s_full = MatrixRadonAdapter(svd_threshold=FULL_TAU, **kw)._s_k_la.double().numpy()
+    for tau in (1e-3, 4e-3, 2e-2):
+        assert MatrixRadonAdapter(svd_threshold=tau, **kw)._s_k_la.numel() == k_for_tau(s_full, tau)
+
+
+def test_nice_taus_are_two_digit_and_cover_the_range():
+    from src.truncation import nice_taus
+    taus = nice_taus(1e-4, 1e-2)
+    assert taus[0] == 1e-4 and taus[-1] == 1e-2
+    assert all(float(f"{t:.1e}") == t for t in taus)
+    assert taus == sorted(set(taus))
+
+
+def test_truncation_outputs_render(matrix_full, tmp_path):
+    """write_outputs leaves what the figures read; render_tree counts a step for it."""
+    import src.visualisations as V
+    from src.truncation import run_study, write_outputs
+    x, _ = _study_inputs(matrix_full, n_samples=2)
+    res = run_study(matrix_full, x, noises=[0.01, 0.05], tau_ref=4e-3, run_noise=0.01)
+    study = tmp_path / V.TRUNCATION_DIR
+    write_outputs(res, study)
+    meta = json.loads((study / "truncation.json").read_text(encoding="utf-8"))
+    assert set(meta["optimal"]) == {"0.01", "0.05"}
+    assert not any(key.startswith("_") for key in meta)
+    assert V.count_render_steps(tmp_path) == 3       # overview, epoch study, truncation
+    assert V.save_truncation_plots(study)
+    assert (study / "tau_spectrum.png").exists() and (study / "tau_error.png").exists()
+
+
+@pytest.mark.parametrize("kind", ["single", "ellipses"])
+def test_phantom_streams_are_seeded(kind):
+    """The same call draws the same phantoms: DIVAL picks a random seed unless
+    it is given fixed ones."""
+    pytest.importorskip("dival")
+    pytest.importorskip("odl")
+    from src.create_phantom_data import phantom_generator
+    (a, seed), (b, _) = phantom_generator(kind, 32), phantom_generator(kind, 32)
+    assert seed is not None
+    for _ in range(3):
+        pa, pb = np.asarray(next(a).data), np.asarray(next(b).data)
+        assert np.array_equal(pa, pb)
+        assert pa.min() >= 0.0 and pa.max() <= 1.0 + 1e-6
+
+
+def test_unknown_phantom_family_is_refused():
+    pytest.importorskip("dival")
+    pytest.importorskip("odl")
+    from src.create_phantom_data import phantom_generator
+    with pytest.raises(ValueError, match="unknown phantom family"):
+        phantom_generator("lodopab", 32)

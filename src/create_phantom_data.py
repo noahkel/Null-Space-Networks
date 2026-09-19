@@ -1,7 +1,8 @@
-"""Dataset-generation pipeline for the single-ellipse phantoms.
+"""Dataset-generation pipeline for the ellipse phantoms.
 
 For each sample, the pipeline:
-  1. draws a random phantom (one ellipse),
+  1. draws a phantom from a fixed seed: one random ellipse (``--phantom single``,
+     the main experiment) or DIVAL's multi-ellipse phantoms (``--phantom ellipses``),
   2. simulates the limited-angle sinogram y = A_la x_gt and adds relative noise,
   3. saves the ground truth, the pinv (truncated-SVD) initialisation and the
      sinogram as .npy files under <out_dir>/<noise>/{gt,pinv,sino}/,
@@ -60,6 +61,28 @@ def single_ellipse_generator(dataset, part='train'):
         yield image
 
 
+PHANTOMS = ("single", "ellipses")
+
+
+def phantom_generator(kind: str, image_size: int, part: str = "train"):
+    """The phantom stream of one family, and the seed it is drawn from.
+
+    single    one random ellipse per image (single_ellipse_generator), the
+              phantoms of the main experiment,
+    ellipses  DIVAL's standard multi-ellipse phantoms: Poisson(40) random,
+              overlapping ellipses of either sign, normalised to [0, 1].
+
+    DIVAL picks its seeds at random unless asked for fixed ones, so it is asked:
+    the same call yields the same phantoms in every run."""
+    dataset = EllipsesDataset(image_size=image_size, fixed_seeds=True)
+    seed = dataset.fixed_seeds.get(part)
+    if kind == "single":
+        return single_ellipse_generator(dataset, part), seed
+    if kind == "ellipses":
+        return dataset.generator(part), seed
+    raise ValueError(f"unknown phantom family {kind!r}, expected one of {PHANTOMS}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--img_size", type=int, default=128)
@@ -70,6 +93,9 @@ def parse_args():
     parser.add_argument("--n_samples", type=int, default=5000)
     parser.add_argument("--out_dir", type=str, default="./")
     parser.add_argument("--svd_thresh", type=float, default=4e-3)
+    parser.add_argument("--phantom", choices=PHANTOMS, default="single",
+                        help="phantom family: one ellipse per image (the main "
+                             "experiment) or DIVAL's multi-ellipse phantoms.")
     return parser.parse_args()
 
 
@@ -96,9 +122,8 @@ def main() -> None:
     ensure_dir(OUT_DIR / "sino")
     ensure_dir(OUT_DIR / "pinv")
 
-    # dataset
-    dataset = EllipsesDataset(image_size=IMG_SIZE)
-    gen = single_ellipse_generator(dataset, 'train')
+    # phantoms: the training stream of the chosen family, from its fixed seed
+    gen, phantom_seed = phantom_generator(args.phantom, IMG_SIZE)
 
     # radon
     dx = 1.0
@@ -112,7 +137,7 @@ def main() -> None:
     # placed part of the noise in directions A^+ annihilates, so the nominal
     # noise level overstated what the reconstruction actually received -- while
     # the adversarial budget, which uses this operator's projector, was fully
-    # effective. truncation_study.py quantifies the difference.
+    # effective. src/truncation.py quantifies the difference.
     radon = MatrixRadonAdapter(
         resolution=IMG_SIZE,
         angles=angles,
@@ -133,7 +158,7 @@ def main() -> None:
     y_norms: List[float] = []
 
     print("Generating data...")
-    print("x_gt from generator")
+    print(f"x_gt from the '{args.phantom}' phantoms, seed {phantom_seed}")
     print("y from radon.forward_la")
     print("y_delta = y with added noise, drawn from range(U_k)")
     print("x_init from radon.backward_la (truncated pinv) -> pinv/")
@@ -160,6 +185,8 @@ def main() -> None:
 
     summary = {
         "dataset": "ellipses",
+        "phantom": args.phantom,
+        "phantom_seed": phantom_seed,
         "n_samples": N_SAMPLES,
         "img_size": int(IMG_SIZE),
         "num_angles": int(NUM_ANGLES),

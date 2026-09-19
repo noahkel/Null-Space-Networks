@@ -50,6 +50,7 @@ function Format-Size([double]$bytes) {
 # A figure is "per-sample" purely by its depth in the tree:
 #   <run>/...                                  overview / aggregate  -> summary
 #   <run>/epoch_study/...                      epoch curves          -> summary
+#   <run>/truncation/...                       truncation study      -> summary
 #   <run>/init_<init>/...                      scatter / consistency -> summary
 #   <run>/init_<init>/<attack>/...             per-attack figures    -> summary
 #   <run>/init_<init>/<attack>/<model>/...     per-sample images     -> bulk

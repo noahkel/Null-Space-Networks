@@ -246,7 +246,7 @@ class MatrixRadonAdapter:
 
         def _cut_and_return(U_np, s_np, Vt_np, source: str):
             # Cut on the singular values as they will be stored, so that k here
-            # is the k that truncation_study.k_for_tau reads off a stored s_k.
+            # is the k that src.truncation.k_for_tau reads off a stored s_k.
             s_np = np.asarray(s_np).astype(store_np).astype(np.float64)
             cutoff = self.svd_threshold * s_np[0]
             keep = s_np >= cutoff

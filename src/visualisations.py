@@ -1079,11 +1079,135 @@ def _render_transfer(attack_dir: Path, meta: Dict, data: Dict[str, np.ndarray]) 
             preds_np, n_ex, attack_name)
 
 
+# --------------------------------------------------------------------------- #
+# Truncation study. src/truncation.py writes <run>/truncation/ with
+# truncation.json, spectrum.csv and curve.csv; the figures read only those.
+# --------------------------------------------------------------------------- #
+TRUNCATION_DIR = "truncation"
+# The noise levels are ordered, so they share one hue from light to dark: steps
+# 250 to 700 of a blue ramp, which pass as an ordinal ramp on white.
+_NOISE_RAMP = ("#86b6ef", "#3987e5", "#1c5cab", "#0d366b")
+_REFERENCE_COLOUR = "#C44E52"
+
+
+def _read_columns(path: Path) -> Dict[str, np.ndarray]:
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    return {key: np.array([float(r[key]) for r in rows]) for key in (rows[0] if rows else {})}
+
+
+def _noise_colours(keys: List[str]) -> Dict[str, Tuple[float, ...]]:
+    """One ramp colour per noise level, lightest for the smallest."""
+    from matplotlib.colors import LinearSegmentedColormap
+    ramp = LinearSegmentedColormap.from_list("noise", _NOISE_RAMP)
+    order = sorted(keys, key=float)
+    spots = np.linspace(0.0, 1.0, len(order)) if len(order) > 1 else [0.66]
+    return {key: ramp(t) for key, t in zip(order, spots)}
+
+
+def save_truncation_plots(study_dir) -> bool:
+    """Figures of a run's truncation study:
+
+      tau_spectrum.png  the singular values, with the optimum at every noise level
+                        and the candidates for a second run marked on them; the
+                        top axis reads off dim N(A) for a cut at that index,
+      tau_error.png     the pseudoinverse error against tau per noise level, split
+                        into its range part (the floor a Nullspace Network keeps)
+                        and its null part, next to dim N(A) against tau.
+
+    Returns False, writing nothing, when the study is not there."""
+    study_dir = Path(study_dir)
+    jpath = study_dir / "truncation.json"
+    if not jpath.exists():
+        return False
+    meta = json.loads(jpath.read_text(encoding="utf-8"))
+    tau_ref, n, dims = meta["tau_ref"], meta["dims"]["n"], meta["dims"]
+    optimal, cands = meta["optimal"], meta["candidates"]
+    keys = sorted(optimal, key=float)
+    colours = _noise_colours(keys)
+    run_key = f"{meta['run_noise']:g}"
+    ref_label = f"reference tau = {tau_ref:g} (dim N = {dims['dim_null_ref']})"
+    dot = dict(ls="none", ms=7, mec="white", mew=1.5, zorder=4)
+    # fewer null dimensions points down, more points up
+    shape = {"half_null": "v", "double_null": "^"}
+
+    spectrum = study_dir / "spectrum.csv"
+    if spectrum.exists():
+        s = _read_columns(spectrum)["sigma_rel"]
+        fig, ax = plt.subplots(figsize=(8, 4.6))
+        ax.semilogy(np.arange(1, s.size + 1), s, color="black", lw=1.2, zorder=2)
+        ax.axhline(tau_ref, color=_REFERENCE_COLOUR, lw=1.2, zorder=1, label=ref_label)
+        for key in keys:
+            o = optimal[key]
+            ax.plot([o["k"]], [s[o["k"] - 1]], marker="o", color=colours[key], **dot,
+                    label=f"optimum at sigma = {key}: tau = {o['tau']:g}")
+        for name in shape:
+            if name in cands:
+                c = cands[name]
+                ax.plot([c["k"]], [s[c["k"] - 1]], marker=shape[name], color="0.45", **dot,
+                        label=f"{name.replace('_', ' ')}: tau = {c['tau']:g}")
+        top = ax.secondary_xaxis("top", functions=(lambda i: n - i, lambda d: n - d))
+        top.set_xlabel("dim N(A) for a cut at this index")
+        ax.set_xlabel("index i of the singular value")
+        ax.set_ylabel(r"$\sigma_i / \sigma_{\max}$")
+        ax.set_xlim(1, s.size)
+        ax.set_title("Singular values of the limited-angle operator; a cut at tau keeps "
+                     "every direction above its line", fontsize=9, pad=10)
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend(fontsize=7, loc="lower left")
+        plt.tight_layout()
+        plt.savefig(study_dir / "tau_spectrum.png", dpi=150)
+        plt.close(fig)
+
+    curve_path = study_dir / "curve.csv"
+    if curve_path.exists():
+        c = _read_columns(curve_path)
+        taus = c["tau"]
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.6))
+        for key in keys:
+            a1.loglog(taus, c[f"rel_l2_{key}"], color=colours[key], lw=1.3,
+                      label=f"sigma = {key}")
+            a1.loglog(taus, c[f"e_range_{key}"], color=colours[key], lw=0.9, ls="--")
+            o = optimal[key]
+            a1.plot([o["tau"]], [o["rel_l2"]["mean"]], marker="o", color=colours[key], **dot)
+        a1.plot([], [], color="0.45", lw=0.9, ls="--", label="range part (dashed)")
+        a1.loglog(taus, c["e_null"], color="black", lw=1.0, ls=":",
+                  label="null part (the same at every sigma)")
+        a1.axvline(tau_ref, color=_REFERENCE_COLOUR, lw=1.2, label=ref_label)
+        # The null part falls towards zero where nobody would truncate; stop two
+        # decades under the best reconstruction so the minima keep the room.
+        a1.set_ylim(bottom=1e-2 * min(optimal[key]["rel_l2"]["mean"] for key in keys))
+        a1.set_xlabel("truncation threshold tau")
+        a1.set_ylabel("mean relative error of the pseudoinverse")
+        a1.set_title("Pseudoinverse error against tau; dots mark the optimum", fontsize=9)
+        a1.grid(True, which="both", alpha=0.25)
+        a1.legend(fontsize=7, loc="upper right")
+
+        a2.semilogx(taus, c["dim_null"], color="black", lw=1.2)
+        a2.axvline(tau_ref, color=_REFERENCE_COLOUR, lw=1.2, label=ref_label)
+        for name, rec in cands.items():
+            look = (dict(marker="o", color=colours.get(run_key, "black")) if name == "optimal"
+                    else dict(marker=shape.get(name, "s"), color="0.45"))
+            a2.plot([rec["tau"]], [rec["dim_null"]], **look, **dot,
+                    label=f"{name.replace('_', ' ')}: tau = {rec['tau']:g}, dim N = {rec['dim_null']}")
+        a2.set_xlabel("truncation threshold tau")
+        a2.set_ylabel("dim N(A)")
+        a2.set_title(f"Null-space dimension; candidates for a second run at sigma = {run_key}",
+                     fontsize=9)
+        a2.grid(True, which="both", alpha=0.25)
+        a2.legend(fontsize=7, loc="upper left")
+        plt.tight_layout()
+        plt.savefig(study_dir / "tau_error.png", dpi=150)
+        plt.close(fig)
+    return True
+
+
 def count_render_steps(attacks_root) -> int:
     """How many progress steps render_tree will emit for this tree.
 
-    One per (init, attack) pair plus the two tree-level steps, so the progress
-    lines can carry a denominator from the very first tick."""
+    One per (init, attack) pair plus the two tree-level steps, and one for the
+    truncation study when the run has one, so the progress lines can carry a
+    denominator from the very first tick."""
     root = Path(attacks_root)
     inits = sorted(p for p in root.glob("init_*") if p.is_dir()) or [root]
     n = 0
@@ -1092,7 +1216,8 @@ def count_render_steps(attacks_root) -> int:
             continue
         n += sum(1 for p in init_dir.iterdir()
                  if p.is_dir() and (p / "summary.json").exists())
-    return n + 2  # + attack overview + epoch study
+    # + attack overview + epoch study (+ truncation study)
+    return n + 2 + int((root / TRUNCATION_DIR / "truncation.json").exists())
 
 
 def render_init(init_dir: Path, on_step=None) -> None:
@@ -1193,4 +1318,8 @@ def render_tree(attacks_root) -> None:
     # Epoch-attack study curves, when attack.py --epoch-study was run.
     step("epoch study")
     save_epoch_study_plots(root)
+    # The truncation study, when slurm_full_run.sh ran it.
+    if (root / TRUNCATION_DIR / "truncation.json").exists():
+        step("truncation study")
+        save_truncation_plots(root / TRUNCATION_DIR)
     print(f"[visualise] done -> {root}")
