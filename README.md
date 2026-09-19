@@ -64,9 +64,14 @@ python visualise.py attacks_n0.01
   error a different τ would reclassify as measured, and how much of it lies
   outside range(A) where no τ reaches it. It also names two candidate
   thresholds for a confirming run.
-- **Single precision, dense layout** in every stage. The geometry cache under
-  `radon_cache/` is keyed on the geometry, τ and the dtype, and is shared by all
-  stages.
+- **Single precision, dense layout** in every stage. The one exception is the SVD
+  itself: it is computed in double precision and only stored in single. In
+  single precision, `torch.linalg.svd` on the GPU returned factors that were
+  orthonormal only to ~5·10⁻³. The null-space projector built from them leaked
+  into the measurements, and the Nullspace Network learned to use the leak.
+  Every build and every cache load checks the factors and refuses any defect
+  above 10⁻⁴. The geometry cache under `radon_cache/` is keyed on the geometry,
+  τ and the dtype, and is shared by all stages.
 - **Splits are by index**: samples 0–3499 train, 3500–3999 select the
   checkpoint, 4000–4999 are the test set every reported number comes from.
   The test set is never used for training or for model selection.

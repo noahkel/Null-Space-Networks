@@ -82,7 +82,8 @@ class MatrixRadonAdapter:
     device : torch.device or None
         Target device for tensors.
     dtype : torch.dtype
-        Floating-point dtype.
+        Floating-point dtype the matrices and SVD factors are stored and applied
+        in. The decomposition itself always runs in float64 (see _truncated_svd).
     dense : bool
         Store A and A_la as dense tensors and apply them with cuBLAS matmuls
         instead of sparse CSR kernels. Radon matrices are only ~1% sparse-
@@ -143,6 +144,9 @@ class MatrixRadonAdapter:
         if cache_path is not None and cache_path.exists():
             print(f"Loading matrix cache from {cache_path}")
             self._load_cache(cache_path)
+            if hasattr(self, "_U_k_la"):
+                self._check_factors(f"cache {cache_path}",
+                                    hint=f" Delete {cache_path} to have it rebuilt.")
         else:
             try:
                 import astra as _astra
@@ -209,6 +213,9 @@ class MatrixRadonAdapter:
         if self.svd_threshold > 0:
             print("Computing SVD of A_la ...")
             self._U_k_la, self._s_k_la, self._Vt_k_la = self._truncated_svd(csr_la)
+            # Before the factors can reach the cache: a bad decomposition is
+            # never saved.
+            self._check_factors("the decomposition")
 
     def _truncated_svd(
         self, csr: scipy.sparse.csr_matrix
@@ -219,8 +226,15 @@ class MatrixRadonAdapter:
         Returns U_k (m,k), s_k (k,), Vt_k (k,n) as torch tensors on self.device,
         retaining singular values >= svd_threshold * s_max.
 
+        The decomposition runs in float64 whatever self.dtype, and only the
+        factors are stored in self.dtype. In float32, torch.linalg.svd on the GPU
+        (default driver) returned factors of this operator that were orthonormal
+        and consistent with A_la only to ~5e-3, far above float32 rounding; the
+        null-space projector built from them leaked into the measurements, and
+        the Nullspace Network trained on it learned to use the leak. Rounding
+        float64 factors to float32 costs ~1e-7. _check_factors verifies them.
         """
-        np_dtype = np.float32 if self.dtype == torch.float32 else np.float64
+        store_np = np.float32 if self.dtype == torch.float32 else np.float64
         m, n = csr.shape
 
         def _t(arr) -> torch.Tensor:
@@ -231,7 +245,9 @@ class MatrixRadonAdapter:
             )
 
         def _cut_and_return(U_np, s_np, Vt_np, source: str):
-            s_np = np.asarray(s_np, dtype=np.float64)
+            # Cut on the singular values as they will be stored, so that k here
+            # is the k that truncation_study.k_for_tau reads off a stored s_k.
+            s_np = np.asarray(s_np).astype(store_np).astype(np.float64)
             cutoff = self.svd_threshold * s_np[0]
             keep = s_np >= cutoff
             print(f"  {m}×{n}: {keep.sum()}/{len(s_np)} singular values retained "
@@ -252,16 +268,13 @@ class MatrixRadonAdapter:
         # ------------------------------------------------------------------
 
         if self.device.type == "cuda":
-            itemsize = np.dtype(np_dtype).itemsize
-            print(f"  densifying {m}×{n} on GPU ({m * n * itemsize / 1e9:.1f} GB, {np_dtype.__name__})")
+            print(f"  densifying {m}×{n} on GPU ({m * n * 8 / 1e9:.1f} GB, float64)")
             dense = None
             try:
-                dense = torch.from_numpy(csr.toarray().astype(np_dtype)).to(self.device)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
-                    U_t, s_t, Vh_t = torch.linalg.svd(dense, full_matrices=False)
+                dense = torch.from_numpy(csr.toarray().astype(np.float64)).to(self.device)
+                U_t, s_t, Vh_t = torch.linalg.svd(dense, full_matrices=False)
                 result = _cut_and_return(
-                    U_t.cpu().numpy(), s_t.cpu().numpy(), Vh_t.cpu().numpy(), "GPU"
+                    U_t.cpu().numpy(), s_t.cpu().numpy(), Vh_t.cpu().numpy(), "GPU, float64"
                 )
                 del dense, U_t, s_t, Vh_t
                 torch.cuda.empty_cache()
@@ -275,12 +288,81 @@ class MatrixRadonAdapter:
         # ------------------------------------------------------------------
         # CPU path: dense LAPACK
         # ------------------------------------------------------------------
-        itemsize = np.dtype(np_dtype).itemsize
-        print(f"  densifying {m}×{n} on CPU ({m * n * itemsize / 1e9:.1f} GB, {np_dtype.__name__}) ...")
-        dense = csr.toarray().astype(np_dtype)
+        print(f"  densifying {m}×{n} on CPU ({m * n * 8 / 1e9:.1f} GB, float64) ...")
+        dense = csr.toarray().astype(np.float64)
         U, s_cpu, Vt = scipy.linalg.svd(dense, full_matrices=False)
         del dense
-        return _cut_and_return(U, s_cpu, Vt, "CPU LAPACK")
+        return _cut_and_return(U, s_cpu, Vt, "CPU LAPACK, float64")
+
+    # ------------------------------------------------------------------
+    # Factor check
+    # ------------------------------------------------------------------
+
+    # Largest defect _check_factors accepts. Float64 factors stored in float32
+    # come in near 1e-7; the float32 GPU decomposition it guards against was
+    # at 5e-3 to 1e-2.
+    FACTOR_TOL = 1e-4
+
+    def _check_factors(self, source: str, hint: str = "") -> None:
+        """Refuse factors that are not a truncated SVD of A_la.
+
+        The Nullspace Network's guarantees are these identities: only if V_k has
+        orthonormal rows is P_N = I - V_k^T V_k a projector, and only if also
+        A_la V_k^T = U_k S_k do P_ran A_la P_N = 0 (data consistency) and
+        V_k P_N = 0 (the range floor) hold. Factors that miss them by a percent
+        still reconstruct plausibly, so nothing downstream would notice.
+
+        Measures, with float64 accumulation, ||V_k V_k^T - I||_2 and
+        ||U_k^T U_k - I||_2 by power iteration and the backward residual
+        ||A_la V_k^T z - U_k S_k z|| / ||S_k z|| on random z; prints all three
+        and raises if any exceeds FACTOR_TOL.
+        """
+        U, Vt = self._U_k_la, self._Vt_k_la
+        g = torch.Generator(device=self.device).manual_seed(0)
+        z0 = torch.randn(int(self._s_k_la.numel()), 4, generator=g,
+                         device=self.device, dtype=torch.float64)
+        z0 = z0 / torch.linalg.norm(z0, dim=0)
+
+        def gram_defect(gram) -> float:
+            # every iterate is a lower bound on the norm; keep the largest
+            z, est = z0, 0.0
+            for _ in range(6):
+                z = gram(z) - z
+                est = max(est, float(torch.linalg.norm(z, dim=0).max()))
+                z = z / torch.linalg.norm(z, dim=0).clamp_min(1e-300)
+            return est
+
+        v_def = gram_defect(lambda z: self._mm64(Vt, self._mm64_t(Vt, z)))
+        u_def = gram_defect(lambda z: self._mm64_t(U, self._mm64(U, z)))
+        sz = self._s_k_la.to(torch.float64)[:, None] * z0
+        res = self._mm64(self._A_la, self._mm64_t(Vt, z0)) - self._mm64(U, sz)
+        f_def = float((torch.linalg.norm(res, dim=0) / torch.linalg.norm(sz, dim=0)).max())
+
+        print(f"  factor check [{source}]: ||V V^T - I|| = {v_def:.1e}, "
+              f"||U^T U - I|| = {u_def:.1e}, ||A V^T z - U S z|| / ||S z|| = {f_def:.1e}")
+        worst = max(v_def, u_def, f_def)
+        if not worst <= self.FACTOR_TOL:          # written so that NaN fails too
+            raise RuntimeError(
+                f"SVD factors from {source} are not a decomposition of A_la to "
+                f"working precision: largest defect {worst:.1e}, tolerance "
+                f"{self.FACTOR_TOL:.0e}. The null-space projector built from them "
+                f"would leak into the measurements.{hint}")
+
+    @staticmethod
+    def _mm64(mat: torch.Tensor, x: torch.Tensor, block: int = 2048) -> torch.Tensor:
+        """mat @ x in float64, converting a dense mat one row block at a time."""
+        if mat.layout != torch.strided:
+            return torch.sparse.mm(mat.to(torch.float64), x)
+        return torch.cat([mat[i:i + block].to(torch.float64) @ x
+                          for i in range(0, mat.shape[0], block)])
+
+    @staticmethod
+    def _mm64_t(mat: torch.Tensor, x: torch.Tensor, block: int = 2048) -> torch.Tensor:
+        """mat^T @ x in float64, converting mat one row block at a time."""
+        out = torch.zeros(mat.shape[1], x.shape[1], dtype=torch.float64, device=x.device)
+        for i in range(0, mat.shape[0], block):
+            out += mat[i:i + block].to(torch.float64).t() @ x[i:i + block]
+        return out
 
     # ------------------------------------------------------------------
     # Cache key / save / load
@@ -294,9 +376,13 @@ class MatrixRadonAdapter:
         h.update(repr(self.phi).encode())
         h.update(repr(self.svd_threshold).encode())
         h.update(self.angles.tobytes())
-        # The decomposition now runs in self.dtype, so a float32 and a float64
-        # adapter no longer produce the same factors and must not share a cache.
+        # The factors are stored in self.dtype, so a float32 and a float64
+        # adapter must not share a cache.
         h.update(str(self.dtype).encode())
+        # They are decomposed in float64 whatever the dtype. Entries from when a
+        # float32 adapter decomposed in float32 lack this tag and are never read
+        # again: their factors were off by ~5e-3 (see _truncated_svd).
+        h.update(b"svd:float64")
         return h.hexdigest()[:16]
 
     def _save_cache(self, path: Path) -> None:

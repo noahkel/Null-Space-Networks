@@ -1768,10 +1768,10 @@ def test_svd_reconstruction(matrix_r, x):
 def test_dense_layout_matches_sparse(matrix_r, matrix_r_dense, x):
     """dense=True/float32 applies the same operators as sparse CSR/float64.
 
-    Guards the pipeline's fast path. The decomposition now runs in the adapter's
-    own dtype, so this compares a float32 SVD against a float64 one and not
-    merely two storage layouts: singular directions are accurate to about
-    eps/tau ~ 3e-5 relative, which is what the tolerance below allows for.
+    Guards the pipeline's fast path. Both adapters decompose in float64; the
+    float32 one stores and applies rounded factors, and the pseudoinverse
+    amplifies that rounding by up to 1/tau, about 3e-5 relative, which is what
+    the tolerance below allows for.
     """
     assert matrix_r._A.layout != torch.strided
     assert matrix_r_dense._A.layout == torch.strided
@@ -1843,6 +1843,68 @@ def test_operator_norm(matrix_r):
     assert matrix_r.norm_A is not None and matrix_r.norm_A > 0
     assert math.isfinite(matrix_r.norm_A)
     assert matrix_r.norm_A2 == pytest.approx(matrix_r.norm_A ** 2, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# The factor check. A float32 decomposition on the GPU once returned factors
+# orthonormal only to ~5e-3: the null-space projector leaked into the
+# measurements and the trained Nullspace Network pushed its correction through
+# the leak. The adapter now decomposes in float64 and refuses bad factors on
+# every build and every cache load.
+# ---------------------------------------------------------------------------
+def _with_factors(radon, **factors):
+    """Shallow copy of ``radon`` with some SVD factors replaced, so the
+    module-scoped fixture itself is never modified."""
+    import copy
+    r = copy.copy(radon)
+    for name, value in factors.items():
+        setattr(r, name, value)
+    return r
+
+
+def test_factor_check_accepts_the_fixture_decompositions(matrix_r, matrix_r_dense):
+    matrix_r._check_factors("test")
+    matrix_r_dense._check_factors("test")        # float64 factors rounded to float32
+
+
+def test_factor_check_rejects_rows_of_V_that_are_not_orthonormal(matrix_r):
+    Vt = matrix_r._Vt_k_la.clone()
+    Vt[-1] *= 1.01
+    with pytest.raises(RuntimeError, match="not a decomposition of A_la"):
+        _with_factors(matrix_r, _Vt_k_la=Vt)._check_factors("test")
+
+
+def test_factor_check_rejects_U_and_V_from_different_decompositions(matrix_r):
+    """Each factor orthonormal on its own, but not a pair: a singular vector
+    whose sign differs between U and V, as when the two come from separate
+    decompositions."""
+    U = matrix_r._U_k_la.clone()
+    U[:, 0] = -U[:, 0]
+    with pytest.raises(RuntimeError, match="not a decomposition of A_la"):
+        _with_factors(matrix_r, _U_k_la=U)._check_factors("test")
+
+
+def test_float32_adapter_decomposes_in_float64(monkeypatch):
+    """The factors are stored in float32 but come from a float64 decomposition:
+    a float32 one is what broke the projector."""
+    pytest.importorskip("astra")
+    import scipy.linalg
+    from src.radon import MatrixRadonAdapter
+    seen = []
+    svd = scipy.linalg.svd
+
+    def spy(a, *args, **kwargs):
+        seen.append(a.dtype)
+        return svd(a, *args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "svd", spy)
+    r = MatrixRadonAdapter(
+        resolution=_RES, angles=_fixture_angles(), det_count=_DET, phi=_PHI,
+        svd_threshold=_SVD_THRESH, dx=1.0, estimate_norm=False,
+        device=torch.device("cpu"), dtype=torch.float32, dense=True, cache_dir=None,
+    )
+    assert seen == [np.float64]
+    assert r._Vt_k_la.dtype == r._U_k_la.dtype == torch.float32
 
 
 # =========================================================================== #
@@ -1980,3 +2042,34 @@ def test_cache_round_trip_restores_the_factors(tmp_path):
     dst._load_cache(path)
     for name in ("_A", "_A_la", "_U_k_la", "_s_k_la", "_Vt_k_la"):
         assert torch.allclose(getattr(dst, name), getattr(src, name)), name
+
+
+def test_a_corrupted_cache_entry_is_refused_on_load(tmp_path):
+    """Every load is checked, so a bad entry stops the stage instead of handing
+    the Nullspace Network a leaking projector."""
+    pytest.importorskip("astra")
+    from src.radon import MatrixRadonAdapter
+    kw = dict(resolution=_RES, angles=_fixture_angles(), det_count=_DET, phi=_PHI,
+              svd_threshold=_SVD_THRESH, dx=1.0, estimate_norm=False,
+              device=torch.device("cpu"), dtype=torch.float32, dense=True,
+              cache_dir=tmp_path)
+    entry = tmp_path / MatrixRadonAdapter(**kw)._cache_key()   # builds and saves
+    MatrixRadonAdapter(**kw)                                    # a sound entry loads
+
+    Vt = np.load(entry / "Vt_k_la.npy")
+    Vt[-1] *= 1.01
+    np.save(entry / "Vt_k_la.npy", Vt)
+    with pytest.raises(RuntimeError, match="not a decomposition of A_la") as exc:
+        MatrixRadonAdapter(**kw)
+    assert str(entry) in str(exc.value)
+
+
+def test_cache_key_has_moved_off_the_float32_decomposed_entry():
+    """radon_cache/2db6c489633fde34 is the pipeline geometry's entry from when a
+    float32 adapter decomposed in float32, and its factors were off by ~5e-3.
+    The key must no longer lead there, or the fix would load the bad factors."""
+    r = _cache_shell(dtype=torch.float32)
+    r.resolution, r.det_count, r.dx = 128, 182, 1.0
+    r.angles = np.linspace(0, 180, 180, endpoint=False) * np.pi / 180
+    r.phi, r.svd_threshold = (0.0, 120 * np.pi / 180), 4e-3
+    assert r._cache_key() != "2db6c489633fde34"
