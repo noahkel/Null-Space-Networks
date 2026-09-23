@@ -449,7 +449,7 @@ survive the truncation form $\operatorname{range}(\mathbf{U}_k)$, a proper
 subspace again. So we have this chain of subspaces:
 $$\operatorname{range}(\mathbf{U}_k)\subset \operatorname{range}(\mathbf{A})\subset\operatorname{range}(\mathbf{M})$$
 For the geometry of this work the three have dimension
-$11\,151$, $16\,384$ and $21\,840$. $16\,384$ is the column rank of
+$11\,150$, $16\,384$ and $21\,840$. $16\,384$ is the column rank of
 $\mathbf{A}$, which is full, so it equals the number of pixels rather than the
 number of measured detector readings. Only the outermost and the innermost occur
 in the implementation. $\mathbf{M}$ defines the shape convention just described,
@@ -535,8 +535,9 @@ geometry, never on the data. Both are therefore cached on disk under a SHA-256
 hash of the resolution, detector count, pixel spacing, angle vector,
 limited-angle window, truncation threshold and floating-point precision, so that
 a later run with the same geometry loads them instead of recomputing them.
-The three stages of a run --- data generation, training and the attacks --- ask for
-the same geometry at the same precision, so one cache entry serves all three and
+The stages of a run --- the truncation study of Section \ref{sec:pinv}, data
+generation, training and the attacks --- ask for
+the same geometry at the same precision, so one cache entry serves them all and
 the singular value decomposition is computed exactly once per geometry. The geometry
 does not depend on the noise level, so the four noise levels of Section \ref{sec:data} share one entry.\\
 \subsection{Pseudoinverse}\label{sec:pinv}
@@ -576,9 +577,9 @@ Equivalently $\lVert\mathbf{A}^{+}\rVert_2=1/\sigma_{\min}\leq
 1/(\tau\sigma_{\max})$. Measured relative to the operator norm, the
 pseudoinverse can amplify by at most $1/\tau$.
 So we can use $\tau$ to limit the noise amplification in the pseudoinverse.\\
-For the geometry of Section \ref{sec:radon} this keeps $11\,151$ of $16\,384$ directions. The numerical
+For the geometry of Section \ref{sec:radon} this keeps $11\,150$ of $16\,384$ directions. The numerical
 null space $\mathcal{N}(\mathbf{A})$, which is the space the Nullspace Network operates on, has
-dimension $16\,384-11\,151=5\,233$, roughly a third of image space. This is not a
+dimension $16\,384-11\,150=5\,234$, roughly a third of image space. This is not a
 small correction channel but a substantial subspace, and every statement of
 Section \ref{sec:nsn} about what the Nullspace Network can and cannot repair
 refers to this splitting of $\mathbb{R}^{16\,384}$.\\
@@ -594,7 +595,7 @@ them. $\mathbf{V}_k$ (image-domain), which is $n\times k$, is used for the null-
 $\mathbf{P}_{\mathcal{N}(\mathbf{A})}=\mathbf{I}-\mathbf{V}_k\mathbf{V}_k^{*}$.
 $\mathbf{U}_k$ (sinogram-domain), which is $m\times k$, the projector $\mathbf{P}_k=\mathbf{U}_k\mathbf{U}_k^{*}$.\\
 Second, the space the Nullspace Network acts in is the numerical null space of the truncated operator, the
-$5\,233$-dimensional space counted above, and the space every decomposition
+$5\,234$-dimensional space counted above, and the space every decomposition
 figure of Section \ref{sec:results} splits along. The error decomposition is also computed without forming the explicit $n\times n$ matrix.
 Instead the null-space complement component is calculated using
 $\mathbf{e}_{\mathcal{N}^\perp}=\mathbf{V}_k\mathbf{V}_k^{*}\mathbf{e}$ and the
@@ -690,12 +691,13 @@ The calibration this protects is the one the attacks depend on. Section
 budget entirely inside $\operatorname{range}(\mathbf{U}_k)$. Were the noise drawn in a larger
 space, the two numbers would no longer describe the same perturbation size.
 Step 3 assures we always draw noise from $\operatorname{range}(\mathbf{U}_k)$, so the full noise reaches the reconstruction.\\
-The difference caused by a draw in the wrong subspace is measured by the script $\texttt{truncation\_study.py}$.
+The difference caused by a draw in the wrong subspace is measured by the truncation study of
+Section \ref{sec:pinv}, which runs with every experiment.
 It compares the two schemes on the same phantoms and the same underlying Gaussian draws.
 Noise drawn in $\operatorname{range}(\mathbf{A})$ delivers
-$0.822\pm0.003$ of its nominal amplitude to the reconstruction, against $1$ when
+$0.825\pm0.004$ of its nominal amplitude to the reconstruction, against $1$ when
 it is drawn in $\operatorname{range}(\mathbf{U}_k)$. An attacker at
-$\varepsilon=\sigma_\text{rel}$ would accordingly have been $1/0.822=1.21$ times
+$\varepsilon=\sigma_\text{rel}$ would accordingly have been $1/0.825=1.21$ times
 as strong as the noise it is meant to be indistinguishable from, equally at
 every noise level. Note also that the noise is added after the measurement rather than to the photon
 counts before it, since the post-measurement Gaussian is the
@@ -1162,7 +1164,7 @@ why it was worth making.
 Applying the projector once costs two matrix products against $\mathbf{V}_k$, namely
 $\mathbf{V}_k^{*}\mathbf{v}$ followed by $\mathbf{V}_k(\cdot)$, that is
 $2kn\approx3.7\cdot10^{8}$ multiply-accumulates per sample, where
-$k=11\,151$ is the number of retained singular directions and $n=16\,384$ the
+$k=11\,150$ is the number of retained singular directions and $n=16\,384$ the
 number of pixels. Against the Nullspace Network the attack pays that four times
 per step, twice in the forward pass and twice again in the backward pass,
 for $50$ iterations and $2$ restarts on every sample. It remains affordable
