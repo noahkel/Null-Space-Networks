@@ -26,7 +26,6 @@ The thin top-level ``visualise.py`` is the CLI entry point and simply calls
 """
 from __future__ import annotations
 
-import csv
 import json
 import math
 from pathlib import Path
@@ -1091,9 +1090,9 @@ _REFERENCE_COLOUR = "#C44E52"
 
 
 def _read_columns(path: Path) -> Dict[str, np.ndarray]:
-    with open(path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    return {key: np.array([float(r[key]) for r in rows]) for key in (rows[0] if rows else {})}
+    """A numeric CSV as one array per column."""
+    rows = read_metric_rows(path)
+    return {key: np.array([r[key] for r in rows]) for key in (rows[0] if rows else {})}
 
 
 def _noise_colours(keys: List[str]) -> Dict[str, Tuple[float, ...]]:
