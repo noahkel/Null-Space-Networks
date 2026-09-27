@@ -565,6 +565,11 @@ cutoff at machine precision would be meaningless here. The value $\tau=4\cdot10^
 just below the smallest of the four noise levels: every direction it keeps is one whose
 signal the weakest noise we simulate does not already drown, and every direction it discards
 is one the pseudoinverse could only have filled with amplified noise.
+Another choice for tau, is one that has minimal reconstruction error under the pseudoinverse reconstruction.
+In the truncation study this is currently being done by testing on 64 sample phantoms from the test dataset.
+The truncation study marks this tau as optimal for the psuedoinverse. It is however not necessarily optimal for the Nullspace or Residual Network
+%TODO:\parencite Studie von Markus 
+The truncation study tests multiple taus, so that no result of this thesis rests on where the boundary was drawn.
 Scaling the threshold by $\sigma_{\max}$ rather than fixing
 it absolutely puts the cutoff in relation to the operator norm, so $\tau$ is
 dimensionless and does not have to be re-tuned when the geometry changes. It also controls the conditioning of
@@ -625,20 +630,12 @@ the layout. The sparse format wins only when the indirection buys a large enough
 in arithmetic to pay for itself; at one per cent of a matrix this size, it does not.
 Dense is also preferred because the automatic differentiation support for sparse CSR is still experimental, and the
 attack depends on differentiating through these products.\\
-Single precision is chosen because it halves the memory of the dense copies without
-meaningfully deteriorating accuracy. The dense singular value decomposition is backward
-stable \parencite{GolubVanLoan}. It returns the exact decomposition of a matrix
-within $\epsilon\lVert\mathbf{A}\rVert_2$ of $\mathbf{A}$, where $\epsilon$ is the unit roundoff.
-Since a perturbation moves no singular value by more than its own norm, the computed
-singular values differ from the exact ones by at most $\epsilon\sigma_{\max}$.
-In single precision $\epsilon\approx1.2\cdot10^{-7}$, while the cutoff sits at
-$\tau\sigma_{\max}$ with $\tau=4\cdot10^{-3}$. The boundary is therefore resolved
-to a relative accuracy of $\epsilon/\tau\approx3\cdot10^{-5}$. A direction would have to lie
-within that fraction of the threshold for rounding to matter.
-The reconstruction inherits the same order of error, since the truncated pseudoinverse
-amplifies by at most $1/\tau$ relative to the operator norm and $\epsilon/\tau$ is again the
-bound. Both are several orders of magnitude below the reconstruction errors of
-Section \ref{sec:results}.
+Single precision is chosen for the matrices and the stored factors because it halves
+the memory of the dense copies without meaningfully deteriorating accuracy. The
+decomposition itself is computed in double precision and only its factors are rounded
+to single. This ensures the decomposition is orthonormal to  $10^{-7}$, which is the level every number in Section
+\ref{sec:results} was produced at. Every build and every load of the cached factors is
+checked against these identities and refused above $10^{-4}$.
 
 \subsection{Data generation}\label{sec:data}
 The dataset consists of $5\,000$ phantoms, each containing a single random
@@ -652,8 +649,8 @@ of at least $0.1$ and the centre and rotation rejected until the ellipse lies
 entirely inside the image. Restricting each image to one ellipse is a
 deliberate simplification, it guarantees both
 architectures reach a small clean reconstruction error.
-This is needed to perform meaningful attacks, since we want to show that the
-attack can manipulate an otherwise good reconstruction.\\
+To give the findings a better basis the study is repeated on one noise level with the single ellipse replaced by
+the $\operatorname{Poisson}(40)$ overlapping ellipses of DIVAL's standard generator.\\
 For every sample the pipeline performs four steps.
 \begin{enumerate}
     \item Draw the ground truth $\mathbf{x}^\dagger$.
@@ -1406,7 +1403,8 @@ rather than four.\\
 Reproducibility rests on three things: fixed seeds, one cached set of attack inputs shared by
 all models, and a test suite run against the real operator.\\
 The random seeds are fixed for data generation, for training and for the attacks, so rerunning
-a stage reproduces the inputs exactly. For training the convolution kernels of cuDNN are not selected deterministically, so it is not reproducible exactly.
+a stage reproduces the inputs exactly. The phantoms are drawn from DIVAL's fixed seeds.
+Only training can not be repeated deterministically since the convolution kernels of cuDNN are selected randomly.
 All models within a run are then attacked on one cached set of inputs, so that
 they see identical data.\\
 The identities the argument of this thesis depends on are covered by a test suite that
@@ -1415,8 +1413,8 @@ projector, the vanishing of its measured trace
 $\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})}=0$, the agreement of the truncated
 factors with the sparse system matrix, the orthogonality of the error decomposition and the
 enforcement of the attack budget, together with the per-sample choice of restart and the
-integrity of the geometry cache.
-
+integrity of the geometry cache. The factors themselves are checked at every build and every
+load, as described in Section \ref{sec:pinv}.
 \section{Results}\label{sec:results}
 \subsection{Model performance}
 \subsubsection{Reconstruction accuracy}
