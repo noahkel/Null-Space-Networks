@@ -46,29 +46,21 @@ import json
 import math
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from src.radon import MatrixRadonAdapter
 
-# The decomposition every tau is cut from: all of range(A).
 FULL_TAU = 1e-15
-# Rows of the printed table: factor-of-two steps around the operating point, a
-# decade either way. The reference, the optimum and the candidates are added.
 REPORT_TAUS = (1e-4, 3e-4, 1e-3, 2e-3, 4e-3, 8e-3, 1.6e-2, 3.2e-2)
 NOISE_LEVELS = (0.005, 0.01, 0.02, 0.05)
-# A second run tests the dependence on tau only if its tau moves dim N(A) by at
-# least this fraction.
 MIN_DIM_CHANGE = 0.2
 
 
 def nice_taus(lo: float = 1e-5, hi: float = 1e-1) -> List[float]:
-    """Every two-significant-digit value from lo to hi: 1.0e-5, 1.1e-5, ...
-
-    The optimum and the candidates are picked from these, so a chosen tau reads
-    well in a table and as a directory name."""
+    """Every two-significant-digit value from lo to hi: 1.0e-5, 1.1e-5, ..."""
     taus = {float(f"{m / 10:.1f}e{e}")
             for e in range(math.floor(math.log10(lo)), math.ceil(math.log10(hi)) + 1)
             for m in range(10, 100)}
@@ -76,22 +68,14 @@ def nice_taus(lo: float = 1e-5, hi: float = 1e-1) -> List[float]:
 
 
 def k_for_tau(s: Sequence[float], tau: float) -> int:
-    """Directions an adapter at ``tau`` retains: the rule of
-    MatrixRadonAdapter._truncated_svd, applied to the singular values as the
-    adapter stores them."""
+    """Directions an adapter at ``tau`` retains"""
     s = np.asarray(s, dtype=np.float64)
     return int((s >= tau * s[0]).sum())
 
 
 @contextmanager
 def truncated_to(radon: MatrixRadonAdapter, k: int, tau: Optional[float] = None):
-    """Temporarily present ``radon`` as the operator truncated to rank ``k``.
-
-    The factors are replaced by prefix slices, so every method of the adapter --
-    proj_ran, backward_la, proj_null_image, decompose_error -- runs the same code
-    the pipeline runs, at a different truncation. The slices are views; nothing
-    is copied. Restored on the way out, including on an exception.
-    """
+    """Temporarily present ``radon`` as the operator truncated to rank ``k``"""
     saved = (radon._U_k_la, radon._s_k_la, radon._Vt_k_la, radon.svd_threshold)
     if not 0 < k <= saved[1].numel():
         raise ValueError(f"k={k} outside 1..{saved[1].numel()}")
@@ -128,10 +112,11 @@ def coefficients(radon: MatrixRadonAdapter, phantoms: torch.Tensor,
     """
     n_s = phantoms.shape[0]
     x = phantoms.to(device=radon.device, dtype=radon.dtype)
+    x_flat = x.reshape(n_s, -1).double()
     g = noise[..., radon._la_mask(), :].reshape(n_s, -1).to(device=radon.device,
-                                                              dtype=radon.dtype)
+                                                            dtype=radon.dtype)
     s = radon._s_k_la.to(torch.float64)
-    c = radon._mm64(radon._Vt_k_la, x.reshape(n_s, -1).t().double()).t()
+    c = radon._mm64(radon._Vt_k_la, x_flat.t()).t()
     a = radon._mm64_t(radon._U_k_la, g.t().double()).t()
     y = radon.forward_la(x).reshape(n_s, -1).double()
 
@@ -139,61 +124,42 @@ def coefficients(radon: MatrixRadonAdapter, phantoms: torch.Tensor,
         return t.detach().cpu().numpy()
 
     return {"c2": cpu(c ** 2), "a2": cpu(a ** 2), "a2s2": cpu((a / s) ** 2),
-            "x2": cpu((x.reshape(n_s, -1).double() ** 2).sum(1)), "y2": cpu((y ** 2).sum(1))}
+            "x2": cpu((x_flat ** 2).sum(1)), "y2": cpu((y ** 2).sum(1))}
 
 
 class Errors:
-    """Per-sample squared errors of the pseudoinverse at every truncation k.
-
-    Arrays are indexed by the number of retained directions, k = 0..K."""
+    """Per-sample squared errors of the pseudoinverse at every truncation k"""
 
     def __init__(self, coef: Dict[str, np.ndarray], n: int, dx: float = 1.0):
         c2 = coef["c2"]
         zero = np.zeros((c2.shape[0], 1))
-        # x outside range(A): what no truncation reaches
         self.beyond = np.maximum(coef["x2"] - c2.sum(1), 0.0)
-        # tail[:, k] = energy of x outside the first k directions, summed from
-        # the small end so a short tail is not the difference of two large sums
-        self.tail = (np.concatenate([np.cumsum(c2[:, ::-1], 1)[:, ::-1], zero], 1)
-                     + self.beyond[:, None])
+        self.tail = (np.concatenate([np.cumsum(c2[:, ::-1], 1)[:, ::-1], zero], 1) + self.beyond[:, None])
         self.C2 = np.concatenate([zero, np.cumsum(coef["a2"], 1)], 1)
         self.C3 = np.concatenate([zero, np.cumsum(coef["a2s2"], 1)], 1)
-        self.c2 = c2
-        self.y2 = coef["y2"] / dx ** 2              # backward_la divides by dx
-        # the denominator of rel_l2_np, floored for near-empty phantoms
+        self.y2 = coef["y2"] / dx ** 2
         self.x_norm = np.maximum(np.sqrt(coef["x2"]), 1e-3 * math.sqrt(n))
 
-    def null2(self, ks: np.ndarray) -> np.ndarray:
-        """||e_N||^2, (S, len(ks)): the phantom's energy the truncation discards."""
-        return self.tail[:, ks]
-
-    def range2(self, ks: np.ndarray, sigma: float) -> np.ndarray:
-        """||e_R||^2, (S, len(ks)): the noise, rescaled to sigma*||y|| inside the
-        retained range, after the pseudoinverse."""
-        return ((sigma ** 2 * self.y2)[:, None] * self.C3[:, ks]
+    def squared(self, ks, sigma: float) -> Tuple[np.ndarray, np.ndarray]:
+        """||e_N||^2 and ||e_R||^2, both (S, len(ks))"""
+        return (self.tail[:, ks],
+                (sigma ** 2 * self.y2)[:, None] * self.C3[:, ks]
                 / np.maximum(self.C2[:, ks], 1e-300))
+
+    def relative(self, ks, sigma: float) -> Tuple[np.ndarray, np.ndarray]:
+        """The same two errors, each relative to ||x||."""
+        null, rng = self.squared(ks, sigma)
+        return np.sqrt(null) / self.x_norm[:, None], np.sqrt(rng) / self.x_norm[:, None]
 
     def at(self, k: int, sigma: float) -> Dict[str, Dict[str, float]]:
         """Relative errors of the pseudoinverse keeping k directions, over samples."""
-        ks = np.array([k])
-        e_n = np.sqrt(self.null2(ks)[:, 0]) / self.x_norm
-        e_r = np.sqrt(self.range2(ks, sigma)[:, 0]) / self.x_norm
+        e_n, e_r = (v[:, 0] for v in self.relative([k], sigma))
         total = np.hypot(e_n, e_r)
         return {"rel_l2": _stats(total), "e_null": _stats(e_n), "e_range": _stats(e_r),
                 "null_frac": _stats(e_n / np.maximum(total, 1e-300))}
 
     def reclassified(self, k_ref: int, k: int, sigma: float) -> Dict[str, float]:
-        """The reference null-space error, seen from truncation k (means).
-
-        e_ref is the pseudoinverse error of a run at the reference, and its null
-        part has energy null_ref. Cut at k instead, a larger tau (k < k_ref) adds
-        the noise e_ref carries between the two cuts, and a smaller tau
-        (k > k_ref) counts the phantom's coefficients there as measured.
-
-          null_ratio  ||e_N(k)|| / ||e_N(ref)||
-          moved       energy crossing the boundary / the larger null energy, in [0, 1]
-          beyond      share of ||e_N(ref)||^2 outside range(A), what no tau reaches
-        """
+        """The reference null-space error, seen from truncation k (means)"""
         null_ref = self.tail[:, k_ref]
         if k >= k_ref:
             shell = self.c2[:, k_ref:k].sum(1)
@@ -249,14 +215,15 @@ def run_study(radon: MatrixRadonAdapter, phantoms: torch.Tensor, noises: Sequenc
 
     grid = np.array(nice_taus())
     k_grid = np.array([k_for_tau(s, t) for t in grid])
+    # the null part is the phantom's own, so it is the same at every noise level
     curve = {"tau": grid, "k": k_grid, "dim_null": n - k_grid,
-             "e_null": (np.sqrt(err.null2(k_grid)) / err.x_norm[:, None]).mean(0)}
+             "e_null": err.relative(k_grid, 0.0)[0].mean(0)}
     optimal = {}
     for sig in noises:
-        en2, er2 = err.null2(k_grid), err.range2(k_grid, sig)
-        rel = (np.sqrt(en2 + er2) / err.x_norm[:, None]).mean(0)
+        e_n, e_r = err.relative(k_grid, sig)
+        rel = np.hypot(e_n, e_r).mean(0)
         curve[f"rel_l2_{sig:g}"] = rel
-        curve[f"e_range_{sig:g}"] = (np.sqrt(er2) / err.x_norm[:, None]).mean(0)
+        curve[f"e_range_{sig:g}"] = e_r.mean(0)
         j = int(np.argmin(rel))
         k = int(k_grid[j])
         optimal[f"{sig:g}"] = {"tau": float(grid[j]), "k": k, "dim_null": n - k,
@@ -301,9 +268,9 @@ def run_study(radon: MatrixRadonAdapter, phantoms: torch.Tensor, noises: Sequenc
         table.append(row)
 
     surviving = np.sqrt(err.C2[:, k_ref] / np.maximum(err.C2[:, n_k], 1e-300))
-    ks = np.array([k_ref])
+    null2, range2 = (v[0, 0] for v in err.squared([k_ref], noises[0]))
     check = cross_check(radon, phantoms[:1], noise[:1], k_ref, noises[0],
-                        float(err.null2(ks)[0, 0]), float(err.range2(ks, noises[0])[0, 0]))
+                        float(null2), float(range2))
     if not check < 1e-3:
         raise RuntimeError(f"the error formulas disagree with the pipeline's projectors "
                            f"by {check:.1e}; the study's numbers cannot be trusted")
@@ -371,6 +338,15 @@ def print_report(res: Dict) -> None:
           f"   # runs at tau = {rec['tau']:g}")
 
 
+def _write_csv(path: Path, columns: Dict[str, np.ndarray]) -> None:
+    """One numeric column per key, the shape visualisations._read_columns expects."""
+    keys = list(columns)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(keys)
+        w.writerows(zip(*([f"{v:.8g}" for v in columns[key]] for key in keys)))
+
+
 def write_outputs(res: Dict, out_dir) -> None:
     """truncation.json (everything but the curves), spectrum.csv (s_i / s_max)
     and curve.csv (mean errors on the grid of nice_taus)."""
@@ -378,17 +354,10 @@ def write_outputs(res: Dict, out_dir) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     meta = {key: value for key, value in res.items() if not key.startswith("_")}
     (out_dir / "truncation.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    with open(out_dir / "spectrum.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["i", "sigma_rel"])
-        w.writerows((i + 1, f"{v:.8e}") for i, v in enumerate(res["_spectrum"]))
-    curve = res["_curve"]
-    cols = list(curve)
-    with open(out_dir / "curve.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(cols)
-        for j in range(len(curve["tau"])):
-            w.writerow([f"{curve[c][j]:.8g}" for c in cols])
+    spectrum = res["_spectrum"]
+    _write_csv(out_dir / "spectrum.csv",
+               {"i": np.arange(1, spectrum.size + 1), "sigma_rel": spectrum})
+    _write_csv(out_dir / "curve.csv", res["_curve"])
 
 
 def parse_args(argv=None):
