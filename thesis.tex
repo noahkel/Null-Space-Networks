@@ -95,7 +95,7 @@ It is easy to see, that this is a linear operator. Under the assumption that $\O
 Aggregating every measurement into one row we receive the linear equation with $\mathbf{A}$ defined by $\mathbf{A}_{ij}:=\mathcal{R}\varphi_j(\theta_i,s_i)$. $$y=\mathbf{A}c$$
 The parameters of the Radon transform $\theta$ and $s$, together with the choice of basis functions, uniquely define $\mathbf{A}\in\mathbb{R}^{m\times n}$.\\
 This simplifies the implementation and allows us to use the pseudoinverse $\mathbf{A}^{+}$ to get a reconstruction of the original image. Due to a large requirement of memory and computational power, this approach is not being used in clinical CT. Images in clinical CT require $512 \times 512$ pixels and low-dose clinical CT works with $700-900$ detector elements and about $1000$ projections per $360^\circ$ slice, which corresponds to $500$ projections per $180^\circ$. In this way we obtain a Matrix of size $ 350\,000\times262\,144$ \parencite{Flohr2013}. Singular value decompositions of matrices of this size take a long time and are therefore not feasible in clinical CT. In this laboratory setting however, our matrix is smaller and using it, simplifies concepts like null space and its complement. This will also be of importance, when we talk about Nullspace Networks and error decomposition into the null space and its complement.\\
-The construction of the Pseudoinverse is done using the singular value decomposition. It is a useful tool that generalizes the eigenvalue decomposition to non square matrices. A general matrix $\mathbf{A}\in\mathbb{R}^{m\times n}$ can be written in the following way:
+The construction of the Pseudoinverse is done using the singular value decomposition. It is a useful tool that generalises the eigenvalue decomposition to non square matrices. A general matrix $\mathbf{A}\in\mathbb{R}^{m\times n}$ can be written in the following way:
 $$\mathbf{A}=\mathbf{U}\Sigma\mathbf{V}^*$$
 Where $\mathbf{U}\in\mathbb{R}^{m\times m}$ and $\mathbf{V}\in\mathbb{R}^{n\times n}$ are orthogonal matrices and $\Sigma\in\mathbb{R}^{m\times n}$ is a diagonal matrix carrying $r$ positive real numbers $\sigma_i$ on its diagonal, where $r$ is the rank of $\mathbf{A}$.
 We fix the ordering once and use it for the rest of this work. The singular values are sorted in descending order,
@@ -144,7 +144,7 @@ Before we get into the key property of a residual network, we need to understand
 \subsubsection{Neural Networks}
 A neural network consists of connected neurons, which are usually grouped into layers.
 Each neuron has multiple weighted inputs and one bias of its own. All inputs are then combined and given to an activation function whose output is the output of the neuron.
-The activation function is usually nonlinear. One neuron can therefore be modeled in the following way:
+The activation function is usually nonlinear. One neuron can therefore be modelled in the following way:
 $$y = \phi\Big(\sum_{i=1}^nw_ix_i + b\Big)\quad w_i,x_i,b\in\mathbb{R}$$
 Where $y$ is the output, $\phi:\mathbb{R}\to\mathbb{R}$ is the activation function, $w_ix_i$ are the weighted inputs and $b$ is the bias of that neuron.
 The layers of the neural network are executed in sequence, the input layer receives the network input and feeds its output into the next layer. The connections between the different layers are an architectural choice.
@@ -160,8 +160,8 @@ it has been reported, that adding more layers to a suitably deep model, increase
 This is surprising, as it is easy to write down a deep model performing on par with the shallow one.
 It can be constructed by supplementing the shallow model with layers that are the identity.
 Such a model possesses a larger depth, but has equivalent performance as the shallow one used to construct it.
-This indicates that some deep networks are harder to optimize than shallow ones, and that the degradation is a
-failure of optimization rather than a lack of expressive power \parencite{res-org}.
+This indicates that some deep networks are harder to optimise than shallow ones, and that the degradation is a
+failure of optimisation rather than a lack of expressive power \parencite{res-org}.
 Residual networks address this degradation problem by learning the residual instead of the whole mapping. They were
 introduced for image classification, where every layer is convolutional, and the residual connection is what made
 networks of a hundred and more convolutional layers trainable at all \parencite{res-org}. The two ideas, convolution
@@ -200,7 +200,7 @@ The U-Net can be segmented into two paths, one contracting and one expansive pat
 The contracting path is built on the repeated application of convolutions,
 each followed by a rectified linear unit (ReLU) and a max pooling operation for down sampling \parencite{U-NET}.\\
 As mentioned before a convolutional neural network restricts the neurons in the next layer that receive the output of a neuron in the current layer.
-A convolution with a kernel of size $3\times3$ can only influence the neuron corresponding to itself and its surrounding $8$ neighbors.
+A convolution with a kernel of size $3\times3$ can only influence the neuron corresponding to itself and its surrounding $8$ neighbours.
 The ReLU function is a popular activation function. It is the identity for positive input values and maps everything else to $0$.
 Max pooling slides a small window across the grid and replaces the values under the window by their maximum. It
 therefore keeps, at each position, only the strongest response in a neighbourhood and discards where within that
@@ -286,7 +286,7 @@ which is free to correct this component and does.\\
 The projection also gives us a decomposition of the space of reconstructions into the null space $\mathcal{N}$ and its complement $\mathcal{N}^\perp$.
 This is used both to analyse our attacks later on and to construct the new type of attack introduced in this work.
 \subsection{Adversarial Attacks}
-An adversarial attack is the targeted construction of a small perturbation to a specific input to a model that maximizes the error of the reconstruction.
+An adversarial attack is the targeted construction of a small perturbation to a specific input to a model that maximises the error of the reconstruction.
 Depending on how this error is measured and how much the threat model knows about the model they can differ significantly \parencite{advers}.
 In this work we want to use adversarial attacks to investigate the robustness of the residual U-Net and the Nullspace Network.
 The next section describes adversarial attacks in more detail and explains modifications we made to the general attack framework to better evaluate our models.\\
@@ -301,11 +301,11 @@ where the attacker has no knowledge of the reconstruction method. As mentioned b
 $$\boldsymbol{\delta}^*\;=\argmax_{\lVert\boldsymbol{\delta}\rVert_p \leq \varepsilon}\;\mathcal{L}(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}), \mathbf{x}^\dagger )$$
 where $\mathbf{y}$ are the measurements, $\mathbf{x}^\dagger$ is the ground truth corresponding to them,
 $\mathcal{L}$ is a loss function and $\varepsilon\in\mathbb{R}_{>0}$ is the budget of the attack.
-Adversarial attacks can use different strategies to find such a perturbation. In this work we relied on the projected gradient descent optimizer (PGD),
-Madry et al. \parencite{PGD} claim this to be the strongest attack utilizing the local first order information of the network.\\\\
+Adversarial attacks can use different strategies to find such a perturbation. In this work we relied on the projected gradient descent optimiser (PGD),
+Madry et al. \parencite{PGD} claim this to be the strongest attack utilising the local first order information of the network.\\\\
 Projected gradient descent is a general method for minimising a differentiable function over
 a closed convex set: one takes a gradient step and projects the result back onto the set.
-Suppose we want to attack the groundtruth, sinogram pair $(\mathbf{x}^\dagger, \mathbf{y})$. 
+Suppose we want to attack the ground truth, sinogram pair $(\mathbf{x}^\dagger, \mathbf{y})$. 
 For this attack the closed convex set is the ball of radius $\varepsilon$ around the clean sinogram,
 $$\mathbf{y}+B_\varepsilon:=\{\mathbf{z}\in\mathbf{Y}\;:\;\lVert\mathbf{z}-\mathbf{y}\rVert_2\leq\varepsilon\},$$
 this ensures that every iterate stays within the budget of the attack.
@@ -333,7 +333,7 @@ bounds it is the energy an attacker may add to the scan, and that is an $\ell_2$
 also the norm in which the simulated measurement noise of Section \ref{sec:data} is prescribed,
 which is what makes attack and noise comparable. Step rule and constraint set are
 therefore both expressed in the $\ell_2$ norm.\\
-A last adaption concerns the feasible set. We investigate only those perturbations of the
+A last adaptation concerns the feasible set. We investigate only those perturbations of the
 measurements that an attacker could realistically produce, that is, perturbations which are
 themselves measurements taken at the angles the scanner actually covers. We therefore
 additionally require the perturbation to lie in $\operatorname{range}(\mathbf{A})$, which
@@ -877,7 +877,7 @@ Where the tensor $\texttt{pred}$ is the network reconstruction and $\texttt{targ
 \begin{center}
 \texttt{torch.optim.Adam(model.parameters(), lr=0.0001)}.
 \end{center}
-Before each step we set the gradient to zero, recompute it with $\texttt{loss.backward()}$ and update the models parameters using the optimizer accordingly. We train for $50$ Epochs with a batch size of $32$, without a learning-rate
+Before each step we set the gradient to zero, recompute it with $\texttt{loss.backward()}$ and update the models parameters using the optimiser accordingly. We train for $50$ Epochs with a batch size of $32$, without a learning-rate
 schedule and without data augmentation.\\
 Both are standard devices and both are deliberately omitted. A learning-rate
 schedule lowers the step size as training proceeds. A large rate early to
@@ -1233,7 +1233,7 @@ square is the quantity the error decomposition below is additive in,
 the numerator splits as
 $\lVert\mathbf{e}\rVert^2=\lVert\mathbf{e}_{\mathcal{N}^\perp}\rVert^2+
 \lVert\mathbf{e}_\mathcal{N}\rVert^2$ and the denominator is common to both
-terms. The normalization
+terms. The normalisation
 $\lVert\mathbf{x}^\dagger\rVert_2$ makes it comparable across phantoms of
 different brightness.
 The denominator is floored, to prevent a potential blow up.
