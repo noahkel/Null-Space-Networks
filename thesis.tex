@@ -1277,50 +1277,34 @@ of an error added back. The two numbers do not add up to the number for the
 full reconstruction, because SSIM and PSNR are not additive over the
 decomposition, which is precisely why this construction is needed in the first place.
 They should be read as an attribution of the damage, not as a decomposition of the score.\\
-Data consistency is measured as the relative residual of the reconstruction
-against the measurement it should explain,
-$$\frac{\lVert\mathbf{P}_k
+Data consistency asks whether a reconstruction $\hat{\mathbf{x}}$, measured again, reproduces
+a given sinogram $\mathbf{y}$. We measure it by the relative residual
+$$r(\hat{\mathbf{x}},\mathbf{y})=\frac{\lVert\mathbf{P}_k
 \mathbf{A}\hat{\mathbf{x}}-\mathbf{y}\rVert_2}
-{\lVert\mathbf{y}\rVert_2},$$
-where $\hat{\mathbf{x}}=\mathcal{F}_\theta(\mathbf{y})$ is the reconstruction being scored and
-$\mathbf{y}$ is the projected noisy sinogram $\mathbf{P}_k\mathbf{y}^\delta$
-that the reconstruction was actually computed from. So the residual asks whether $\hat{\mathbf{x}}$ explains the data
-it was given.
-The forward operator is the sparse limited angle $\mathbf{A}$ itself and not the truncated factorisation
-$\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}$. Truncation is a property of the inverse. It was introduced in Section
-\ref{sec:pinv} to bound the factor by which noise is amplified on the way back from
-measurements to image, and that amplification is $1/\sigma_i$, which is large exactly where
-$\sigma_i$ is small. The forward direction has no such problem, its gain is $\sigma_i$,
-so a sub-threshold direction is attenuated rather than amplified.
-Substituting $\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}$ for $\mathbf{A}$ here would therefore not
-stabilise anything, it would only delete a term. The difference between the two is
-$\mathbf{A}(\mathbf{I}-\mathbf{V}_k\mathbf{V}_k^{*})$, the measurement of the null-space
-component of $\hat{\mathbf{x}}$, which is small but not zero and which is precisely the part
-of the reconstruction the network was free to invent.
-$\mathbf{P}_k$ is applied to $\mathbf{A}\hat{\mathbf{x}}$ rather than omitted,
-because $\hat{\mathbf{x}}$ is an arbitrary image, so
-$\mathbf{A}\hat{\mathbf{x}}$ may have a component in the discarded
-small-singular-value directions, whereas $\mathbf{y}$ by construction does not.
-Leaving that component in would add to the residual a term that measures nothing
-about data consistency. With $\mathbf{P}_k$ applied, both sides of the difference
-lie in $\operatorname{range}(\mathbf{U}_k)$. The one subspace the noise, the
-reconstruction and the attack all live in.\\
-Two versions of this number are recorded, differing only in which sinogram the reconstruction
-is asked to explain. Against the attacked sinogram
-$\mathbf{P}_k(\mathbf{y}^\delta+\boldsymbol{\delta})$, the residual measures data consistency in the sense of Section \ref{sec:nsn}.
-Against the clean sinogram $\mathbf{P}_k\mathbf{y}^\delta$ it measures agreement with the
-measurement the scanner actually took.\\
-For the Nullspace Network both are fixed in advance rather than measured. Since
-$\mathbf{A}\mathbf{A}^{+}=\mathbf{P}_k$ and
-$\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})}=0$, its reconstruction reproduces
-exactly the sinogram it was handed, so the first residual is zero up to rounding, whatever the attack does, and the second is the size of the perturbation itself,
-$$\frac{\lVert\mathbf{P}_k\mathbf{A}\hat{\mathbf{x}}-\mathbf{P}_k\mathbf{y}^\delta\rVert_2}
-{\lVert\mathbf{P}_k\mathbf{y}^\delta\rVert_2}
+{\lVert\mathbf{y}\rVert_2}.$$
+The projection $\mathbf{P}_k$ is there because the sinograms the networks receive are
+projected onto $\operatorname{range}(\mathbf{U}_k)$, while $\mathbf{A}\hat{\mathbf{x}}$ need not be.
+Without it the residual would contain a part that no input could ever match. Note that
+$\mathbf{P}_k\mathbf{A}=\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}$, so the residual only compares
+the $k$ directions that are actually used for the reconstruction.\\
+We record the residual against two sinograms. Against the sinogram the network was actually given,
+$\mathbf{P}_k(\mathbf{y}^\delta+\boldsymbol{\delta})$, it is data consistency in the sense of
+Section \ref{sec:nsn}. Against the unattacked sinogram $\mathbf{P}_k\mathbf{y}^\delta$ it measures
+agreement with what the scanner actually measured. Since the two sinograms differ only by
+$\mathbf{P}_k\boldsymbol{\delta}$, the triangle inequality gives
+$$\big|\,\lVert\mathbf{P}_k\mathbf{A}\hat{\mathbf{x}}-\mathbf{P}_k(\mathbf{y}^\delta+\boldsymbol{\delta})\rVert_2
+-\lVert\mathbf{P}_k\mathbf{A}\hat{\mathbf{x}}-\mathbf{P}_k\mathbf{y}^\delta\rVert_2\,\big|
+\;\leq\;\lVert\boldsymbol{\delta}\rVert_2 ,$$
+so after normalisation the two residuals differ by at most about $\varepsilon$. This bounds
+only their difference, not the residuals themselves. A reconstruction that fits neither sinogram
+has two large residuals, which are simply close to each other. For the Nullspace Network both values are known in advance. Since
+$\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})}=0$, it reproduces exactly the sinogram
+it was given, so the first residual is zero up to rounding, whatever the attack does. The second is
+then just the size of the perturbation,
+$$r(\hat{\mathbf{x}},\mathbf{P}_k\mathbf{y}^\delta)
 =\frac{\lVert\boldsymbol{\delta}\rVert_2}{\lVert\mathbf{P}_k\mathbf{y}^\delta\rVert_2}
 \;\leq\;\varepsilon .$$
-For the residual network the first residual is free to grow, since nothing in its architecture
-ties its correction to the measured data, and the second then differs from the first by at most
-$\varepsilon$ in either direction.\\
+For the Residual U-Net nothing ties the output to the data, so both residuals have to be measured.\\
 \subsection{Lipschitz Study}\label{sec:lipschitz}
 Finally, an attack-independent robustness measure is computed. Every number
 above is the outcome of one particular attack, so none of them can distinguish a
@@ -1416,28 +1400,82 @@ enforcement of the attack budget, together with the per-sample choice of restart
 integrity of the geometry cache. The factors themselves are checked at every build and every
 load, as described in Section \ref{sec:pinv}.
 \section{Results}\label{sec:results}
+In the following section the results of the training and of the attacks are discussed.
+For the attacks, the tests split of the data is used, so the models have never seen the phantoms used during the attack.
+The attack suite is run on the first $N=128$ of them, the epoch study of Section \ref{sec:epoch} uses $32$.
+Unless a median is named explicitly, every reported number is a mean over the $128$ attacked samples, and $\pm$ denotes the $95\%$ confidence
+interval of Section \ref{sec:metrics}. Errors are reported per channel throughout.\\
+
 \subsection{Model performance}
 \subsubsection{Reconstruction accuracy}
+Table \ref{tab:clean} gives the clean reconstruction of both networks next to the truncated
+pseudoinverse they correct.
+\begin{table}[ht]
+\centering
+\caption{Clean reconstruction on the test set, means over $N=128$ samples. The last two
+columns are the null-space and the range component of the error, both relative to
+$\lVert\mathbf{x}^\dagger\rVert_2$.}
+\label{tab:clean}
+\begin{tabular}{l l r r r r r}
+\toprule
+$\sigma_{\text{rel}}$ & method & rel. $\ell_2$ & PSNR & SSIM &
+$\lVert\mathbf{e}_{\mathcal{N}}\rVert$ & $\lVert\mathbf{e}_{\mathcal{N}^\perp}\rVert$ \\
+\midrule
+\multirow{3}{*}{$0.005$} & $\mathbf{A}^{+}$ & 0.3184 & 22.93 & 0.245 & 0.2736 & 0.1441 \\
+ & Residual U-Net & 0.0154 & 49.81 & 0.993 & 0.0105 & 0.0110 \\
+ & Nullspace Network & 0.1450 & 29.41 & 0.495 & 0.0083 & 0.1441 \\
+\midrule
+\multirow{3}{*}{$0.01$} & $\mathbf{A}^{+}$ & 0.4144 & 20.34 & 0.142 & 0.2736 & 0.2882 \\
+ & Residual U-Net & 0.0235 & 45.84 & 0.983 & 0.0160 & 0.0169 \\
+ & Nullspace Network & 0.2886 & 23.45 & 0.259 & 0.0092 & 0.2882 \\
+\midrule
+\multirow{3}{*}{$0.02$} & $\mathbf{A}^{+}$ & 0.6574 & 16.21 & 0.076 & 0.2736 & 0.5764 \\
+ & Residual U-Net & 0.0372 & 41.76 & 0.966 & 0.0263 & 0.0259 \\
+ & Nullspace Network & 0.5776 & 17.41 & 0.120 & 0.0171 & 0.5764 \\
+\midrule
+\multirow{3}{*}{$0.05$} & $\mathbf{A}^{+}$ & 1.4796 & 9.20 & 0.039 & 0.2736 & 1.4411 \\
+ & Residual U-Net & 0.0741 & 35.82 & 0.918 & 0.0526 & 0.0505 \\
+ & Nullspace Network & 1.4419 & 9.48 & 0.055 & 0.0244 & 1.4411 \\
+\bottomrule
+\end{tabular}
+\end{table}
+Read as totals, the two architectures are not close. The residual network reduces the
+relative $\ell_2$ error of the pseudoinverse by a factor between $18$ and $21$, from
+$0.3184$ to $0.0154$ at the lowest noise level and from $1.4796$ to $0.0741$ at the highest,
+and it holds an SSIM above $0.91$ everywhere. The Nullspace Network reduces the same error
+only from $0.3184$ to $0.1450$, and at $\sigma_{\text{rel}}=0.05$ hardly at all, from
+$1.4796$ to $1.4419$. The reason is the constraint of the Nullspace Network. The range component of the
+Nullspace Network's error is $0.1441$, $0.2882$, $0.5764$ and $1.4411$. Exactly equal to the range component of the pseudoinverse.
+The two agree to every digit printed, at every noise level, because they are the same number. With
+$\hat{\mathbf{x}}=\mathbf{x}_0+\mathbf{P}_{\mathcal{N}(\mathbf{A})}N_\theta(\mathbf{x}_0)$ the
+correction has no component outside $\mathcal{N}(\mathbf{A})$, so
+$$(\mathbf{I}-\mathbf{P}_{\mathcal{N}(\mathbf{A})})(\hat{\mathbf{x}}-\mathbf{x}^\dagger)
+=(\mathbf{I}-\mathbf{P}_{\mathcal{N}(\mathbf{A})})(\mathbf{x}_0-\mathbf{x}^\dagger)$$
+identically. Measured per sample, the ratio
+$\lVert\mathbf{e}_{\mathcal{N}^\perp}\rVert/\lVert\mathbf{e}_{\mathcal{N}^\perp}^{\,\text{init}}\rVert$
+is $1.0000$ for the Nullspace Network in every run, clean and attacked alike. This is expected due to the above identity and shows the Nullspace Network is truly data consistent.
+The unrestricted residual network, removes more than $90\%$ of the range component, which leads to the better reconstruction error.
+The null component of the pseudoinverse error, $0.2736$, is the same number at all four noise levels. This can be explained by $\mathbf{P}_{\mathcal{N}(\mathbf{A})}
+\mathbf{x}^\dagger$ is the part of the phantom the truncated operator never measures. So the noise can never reach this component.
+The four datasets share their phantoms, so it is not merely the same in expectation but the same to four digits.\\
+On the channel the Nullspace Network does control, the picture reverses. Its clean
+null-space error is $0.0083$, $0.0092$, $0.0171$ and $0.0244$ against the residual network's
+$0.0105$, $0.0160$, $0.0263$ and $0.0526$. It is better at every noise level.
+The Nullspace Network is focused on the nullspace component it can correct and outperforms the general residual network if we restrict to the nullspace component.
+Every total error of the Nullspace Network in the left half of Table \ref{tab:clean}
+is the inherited floor on the range component plus a small learned term.
+A comparison of totals between the two architectures is consequently a comparison of the constraint, not of the learned
+maps. This is the reason we focus on the error decomposition from here on.
+
 \subsubsection{Data consistency}
-The two residuals of Section \ref{sec:metrics} are bounded against one another by the attack
-budget, and that is what they report. The attacked and the clean sinogram differ by
-$\boldsymbol{\delta}$, whose size is capped at the noise level by construction, so the two
-residuals differ by at most $\varepsilon$, and no attack inside the budget can make a
-data-consistent reconstruction look inconsistent with the true measurement by more than that.
-The disagreement an attack creates is therefore not between sinograms at all. Both sinograms
-explain the reconstruction to within a noise-sized perturbation; what has moved is the image,
-and the distance between $\hat{\mathbf{x}}$ and $\mathbf{x}^\dagger$ is bounded by neither
-residual, because the null-space component of that distance is measured by nothing in sinogram
-space. Data consistency certifies that a reconstruction explains its data, not that its data
-were the data the scanner produced, and it says nothing at all about the component of the image
-the measurement never constrained. The metrics of Section \ref{sec:metrics}, and the error
-decomposition in particular, are what report that.\\
 
 \subsection{General adversarial attack}
-
 \subsection{Targeted adversarial attack}
 \subsection{Epoch study}
-
+\subsection{Local Lipschitz constants}\label{sec:results-lipschitz}
+\subsection{The choice of the truncation}\label{sec:results-tau}
+\subsection{The phantoms}\label{sec:results-data}
+\subsection{What the evidence supports}\label{sec:results-claim}
 \section{Conclusion and Outlook}
 \subsection{Conclusion}
 \subsection{Outlook}\label{sec:outlook}
