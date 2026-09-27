@@ -2124,10 +2124,9 @@ def test_truncation_error_formulas_match_the_pipeline(matrix_full, sigma):
                 eta = r.proj_ran(noise[i:i + 1])
                 eta = sigma * (torch.linalg.norm(y) / torch.linalg.norm(eta)) * eta
                 e_ran, e_nul = r.decompose_error(r.backward_la(y + eta) - x[i:i + 1])
-            ks = np.array([k])
-            assert float((e_nul ** 2).sum()) == pytest.approx(err.null2(ks)[i, 0], rel=1e-8)
-            assert float((e_ran ** 2).sum()) == pytest.approx(
-                err.range2(ks, sigma)[i, 0], rel=1e-8, abs=1e-20)
+            null2, range2 = err.squared([k], sigma)
+            assert float((e_nul ** 2).sum()) == pytest.approx(null2[i, 0], rel=1e-8)
+            assert float((e_ran ** 2).sum()) == pytest.approx(range2[i, 0], rel=1e-8, abs=1e-20)
 
 
 def test_truncation_optimum_and_candidates_match_brute_force(matrix_full):
