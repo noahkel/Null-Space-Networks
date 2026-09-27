@@ -8,7 +8,10 @@ phantoms:
 
   which tau is optimal   per noise level, the tau at which the pseudoinverse
                          reconstruction A^+ y^delta has the smallest mean
-                         relative error. This is the oracle choice for a
+                         relative error. Optimal for the pseudoinverse alone:
+                         no network is trained per tau, so this is not the tau
+                         that is best for a RESNET or NSN reconstruction, and
+                         the two need not agree. This is the oracle choice for a
                          truncated SVD, with the noise drawn the way
                          create_phantom_data draws it at that tau: through that
                          tau's own range projector, rescaled to sigma*||y||.
@@ -162,8 +165,10 @@ class Errors:
         """The reference null-space error, seen from truncation k (means)"""
         null_ref = self.tail[:, k_ref]
         if k >= k_ref:
-            shell = self.c2[:, k_ref:k].sum(1)
-            null_k = np.maximum(null_ref - shell, 0.0)
+            # the phantom's coefficients between the two cuts, which a smaller
+            # tau counts as measured; tail differences, so no extra array
+            null_k = self.tail[:, k]
+            shell = null_ref - null_k
         else:
             shell = (sigma ** 2 * self.y2 / np.maximum(self.C2[:, k_ref], 1e-300)
                      * (self.C3[:, k_ref] - self.C3[:, k]))
@@ -252,7 +257,8 @@ def run_study(radon: MatrixRadonAdapter, phantoms: torch.Tensor, noises: Sequenc
                      f"result depends on tau, run half_null or double_null")
     note = "; ".join(notes)
     recommended = {"tau": best["tau"], "k": best["k"], "dim_null": best["dim_null"],
-                   "reason": f"smallest mean rel-L2 of A^+ y^delta at sigma={run_noise:g}",
+                   "reason": f"smallest mean rel-L2 of the pseudoinverse A^+ y^delta at "
+                             f"sigma={run_noise:g}; no network is trained per tau",
                    "note": note}
 
     table = []
@@ -322,7 +328,7 @@ def print_report(res: Dict) -> None:
         r = row["per_noise"][run_key]
         print(f"  {row['tau']:>8g} {r['null_ratio']:>12.3f} {r['moved']:>7.3f} {r['beyond']:>16.3f}")
 
-    print("\n--- optimal tau: smallest mean rel-L2 of A^+ y^delta -------------------")
+    print("\n--- optimal tau: smallest mean rel-L2 of A^+ y^delta (the pseudoinverse\n      alone; no network is trained per tau) ----------------------------------")
     for key, o in res["optimal"].items():
         print(f"  sigma={key:>6}: tau = {o['tau']:<8g} k = {o['k']:>6}, dim N = {o['dim_null']:>6},"
               f" rel-L2 {o['rel_l2']['mean']:.4f} (reference: {o['rel_l2_at_ref']['mean']:.4f})")

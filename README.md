@@ -17,7 +17,7 @@ operator. `thesis.tex` is the write-up; this file is how to run it.
 | `src/attack.py` (entry: `attack.py`) | PGD attack suite, epoch study, metrics, Lipschitz estimate |
 | `src/visualisations.py` (entry: `visualise.py`) | every figure, rebuilt from saved artifacts only |
 | `slurm_full_run.sh` | the full experiment for one noise level as one Slurm job |
-| `src/truncation.py` | the truncation study of a run: the optimal τ per noise level, how much the channel split depends on τ, candidates for a second truncation |
+| `src/truncation.py` | the truncation study of a run: the τ per noise level at which the pseudoinverse is best, how much the channel split depends on τ, candidates for a second truncation |
 | `tests/test_nsn.py` | the test suite |
 
 ## Running
@@ -31,7 +31,7 @@ aborts):
 ```bash
 sbatch --export=ALL,NOISE=0.01 slurm_full_run.sh
 sbatch --export=ALL,NOISE=0.01,CREATE_DATA=0,TRAIN=0 slurm_full_run.sh   # reuse data and models
-sbatch --export=ALL,NOISE=0.01,SVD_THRESH=auto slurm_full_run.sh         # at the optimal truncation
+sbatch --export=ALL,NOISE=0.01,SVD_THRESH=auto slurm_full_run.sh         # at the pseudoinverse's best τ
 sbatch --export=ALL,NOISE=0.01,SVD_THRESH=1e-3 slurm_full_run.sh         # at another truncation
 sbatch --export=ALL,NOISE=0.01,PHANTOM=ellipses slurm_full_run.sh        # on multi-ellipse phantoms
 ```
@@ -72,7 +72,7 @@ from `src`.
   truncations are nested, so each τ is a prefix of the factors, and the
   pseudoinverse error at every τ follows from cumulative sums of the
   coefficients). It reports the τ that minimises the pseudoinverse error per
-  noise level, how far the boundary moves, how much of the null-space error a
+  noise level - the pseudoinverse alone, since no network is trained per τ - how far the boundary moves, how much of the null-space error a
   different τ would reclassify as measured, and how much of it lies outside
   range(A) where no τ reaches it. It also names candidate thresholds for a
   second run.

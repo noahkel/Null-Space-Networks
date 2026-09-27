@@ -13,7 +13,7 @@
 # A second truncation, to test whether a channel-restricted result depends on
 # where tau was put:
 #
-#   sbatch --export=ALL,NOISE=0.01,SVD_THRESH=auto slurm_full_run.sh    # the optimum
+#   sbatch --export=ALL,NOISE=0.01,SVD_THRESH=auto slurm_full_run.sh    # where A+ is best
 #   sbatch --export=ALL,NOISE=0.01,SVD_THRESH=0.032 slurm_full_run.sh  # any other tau
 #
 # DIVAL's standard multi-ellipse phantoms instead of one ellipse per image:
@@ -60,7 +60,8 @@ PHANTOM=${PHANTOM:-single}
 # The truncation of the operator. It is baked into the data (the noise is drawn
 # through this operator's range projector) and into summary.json, from where
 # train.py and attack.py read it, so a new value means regenerating the data.
-# "auto" takes the tau the truncation study finds optimal at this noise level.
+# "auto" takes the tau at which the truncation study finds the pseudoinverse best at
+# this noise level; no network is trained per tau, so it is not optimal for them.
 SVD_THRESH=${SVD_THRESH:-4e-3}
 DEFAULT_SVD_THRESH=4e-3
 
@@ -118,7 +119,8 @@ if [ "$RUN_TESTS" -eq 1 ]; then
     python -m pytest -q
 fi
 
-# SVD_THRESH=auto: the study runs against the default tau and names the optimum
+# SVD_THRESH=auto: the study runs against the default tau and names the tau at which
+# the pseudoinverse is best
 # at this noise level, which the rest of the run then uses. Its output waits
 # under logs/ until the run's directory, which depends on tau, is known.
 TRUNC_STAGED=""

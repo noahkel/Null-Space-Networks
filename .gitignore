@@ -9,3 +9,12 @@ presentation_overview.py
 /attacks_*
 /radon_cache
 /presentation
+*.aux
+*.bcf
+*.dvi
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.xml
+*.toc
