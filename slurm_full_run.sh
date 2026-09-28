@@ -75,10 +75,19 @@ EPOCH_STUDY_MAX=${EPOCH_STUDY_MAX:-32}
 CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-1}
 LIPSCHITZ_SAMPLES=${LIPSCHITZ_SAMPLES:-32}
 LIPSCHITZ_ITERS=${LIPSCHITZ_ITERS:-16}
-# Subspaces the local gain is estimated in: null, range (= null-complement) and
-# unrestricted. Each costs a full pass of power iterations; set to "null" alone
-# for the comparable number only.
-LIPSCHITZ_RESTRICTIONS=${LIPSCHITZ_RESTRICTIONS:-null,range,full}
+# Subspaces the local gain is estimated in: null, range (= null-complement),
+# unrestricted, and cross (input in the null-complement, output in the null
+# space: the gain a null-space attack exploits). Each costs a full pass of power
+# iterations; set to "null" alone for the comparable number only.
+LIPSCHITZ_RESTRICTIONS=${LIPSCHITZ_RESTRICTIONS:-null,range,full,cross}
+# LIPSCHITZ_ONLY=1 skips the attacks and only adds the gains to the run's
+# lipschitz.json, e.g. the cross gain of a finished run:
+#
+#   sbatch --export=ALL,NOISE=0.01,RUN_TESTS=0,RUN_TRUNCATION=0,CREATE_DATA=0,TRAIN=0,LIPSCHITZ_ONLY=1,LIPSCHITZ_RESTRICTIONS=cross,RUN_EPOCH_STUDY=0 slurm_full_run.sh
+LIPSCHITZ_ONLY=${LIPSCHITZ_ONLY:-0}
+# PGD objectives of the epoch study, space-separated: "mse" (the total error)
+# and/or "null" (the null-space error, informative about the NSN's correction).
+EPOCH_OBJECTIVES=${EPOCH_OBJECTIVES:-mse}
 
 # Truncation study: training phantoms it looks at, and the noise levels it
 # evaluates (the run's own is always added).
@@ -90,6 +99,7 @@ RUN_TESTS=${RUN_TESTS:-1}
 RUN_TRUNCATION=${RUN_TRUNCATION:-1}
 CREATE_DATA=${CREATE_DATA:-1}
 TRAIN=${TRAIN:-1}
+RUN_ATTACKS=${RUN_ATTACKS:-1}
 RUN_EPOCH_STUDY=${RUN_EPOCH_STUDY:-1}
 
 cd "$REPO_DIR" || exit 1
@@ -194,18 +204,25 @@ fi
 
 # Every model x every attack on one shared sample set, plus the attack-free
 # Lipschitz estimate.
-banner "attack suite"
-python -u attack.py --data-root "$DATA_DIR" --model-dir "$MODEL_DIR" \
-    --max-samples "$MAX_SAMPLES" --lipschitz \
-    --lipschitz-samples "$LIPSCHITZ_SAMPLES" --lipschitz-iters "$LIPSCHITZ_ITERS" \
-    --lipschitz-restrictions "$LIPSCHITZ_RESTRICTIONS" \
-    --out-dir "$OUT_DIR"
+if [ "$RUN_ATTACKS" -eq 1 ]; then
+    banner "attack suite"
+    LIP_ONLY_FLAG=""
+    if [ "$LIPSCHITZ_ONLY" -eq 1 ]; then LIP_ONLY_FLAG="--lipschitz-only"; fi
+    python -u attack.py --data-root "$DATA_DIR" --model-dir "$MODEL_DIR" \
+        --max-samples "$MAX_SAMPLES" --lipschitz $LIP_ONLY_FLAG \
+        --lipschitz-samples "$LIPSCHITZ_SAMPLES" --lipschitz-iters "$LIPSCHITZ_ITERS" \
+        --lipschitz-restrictions "$LIPSCHITZ_RESTRICTIONS" \
+        --out-dir "$OUT_DIR"
+fi
 
 # Writes epoch_study/*.csv into the same run dir, so it runs before rendering.
 if [ "$RUN_EPOCH_STUDY" -eq 1 ]; then
-    banner "epoch study"
-    python -u attack.py --epoch-study --data-root "$DATA_DIR" --model-dir "$MODEL_DIR" \
-        --max-samples "$EPOCH_STUDY_MAX" --out-dir "$OUT_DIR"
+    for EPOCH_OBJECTIVE in $EPOCH_OBJECTIVES; do
+        banner "epoch study ($EPOCH_OBJECTIVE)"
+        python -u attack.py --epoch-study --epoch-objective "$EPOCH_OBJECTIVE" \
+            --data-root "$DATA_DIR" --model-dir "$MODEL_DIR" \
+            --max-samples "$EPOCH_STUDY_MAX" --out-dir "$OUT_DIR"
+    done
 fi
 
 # Compute nodes are headless. Renders the truncation study with the rest.

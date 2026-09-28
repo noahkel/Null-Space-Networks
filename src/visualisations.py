@@ -512,6 +512,7 @@ _LIPSCHITZ_RESTRICTIONS = {
     "null":  ("null: ||P_N . J_g . P_N||", "#4C72B0"),
     "range": ("range: ||P_R . J_g . P_R||", "#55A868"),
     "full":  ("unrestricted: ||J_g||", "#8172B2"),
+    "cross": ("cross: ||P_N . J_g . P_R||", "#CCB974"),
 }
 
 
@@ -977,10 +978,25 @@ def save_attack_overview(attacks_root) -> None:
 
 
 
-def save_epoch_attackability_plot(csv_path, out_path) -> None:
+def _epoch_study_channel(csv_path) -> str:
+    """'nul' for an epoch study of the null-space attack ({init}_{model}_null.csv),
+    whose curves are the null-space error; '' (the total error) otherwise."""
+    return "nul" if Path(csv_path).stem.endswith("_null") else ""
+
+
+def _epoch_study_error_keys(channel: str) -> Tuple[str, str]:
+    """(adversarial, clean) median error columns of an epoch study's channel."""
+    tail = f"_{channel}" if channel else ""
+    return f"adv_rel_l2{tail}_median", f"clean_rel_l2{tail}_median"
+
+
+def save_epoch_attackability_plot(csv_path, out_path,
+                                  ylim: Optional[Tuple[float, float]] = None) -> None:
     """Adversarial error vs training epoch overlaid on the train/val loss curves.
 
-    Left axis: clean and adversarial reconstruction rel-L2 (median) per epoch.
+    Left axis: clean and adversarial reconstruction rel-L2 (median) per epoch,
+    of the null-space component for a null-space attack and of the total error
+    otherwise, fixed to ``ylim`` when given so several models can share one scale.
     Right axis: train and validation loss. The best-val epoch is marked. If
     attackability (adv rel-L2) keeps rising after the validation loss bottoms out
     and starts diverging from the training loss, the extra vulnerability is
@@ -994,18 +1010,23 @@ def save_epoch_attackability_plot(csv_path, out_path) -> None:
     if not rows:
         return
     rows.sort(key=lambda r: r.get("epoch", 0.0))
+    channel = _epoch_study_channel(csv_path)
+    adv_key, clean_key = _epoch_study_error_keys(channel)
+    what = "null-space rel-L2" if channel else "rel-L2"
     ep = [r.get("epoch", float("nan")) for r in rows]
-    adv = [r.get("adv_rel_l2_median", float("nan")) for r in rows]
-    clean = [r.get("clean_rel_l2_median", float("nan")) for r in rows]
+    adv = [r.get(adv_key, float("nan")) for r in rows]
+    clean = [r.get(clean_key, float("nan")) for r in rows]
     train = [r.get("train_loss", float("nan")) for r in rows]
     val = [r.get("val_loss", float("nan")) for r in rows]
     best = [r.get("epoch") for r in rows if r.get("is_best", 0.0) >= 1.0]
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    l1, = ax.plot(ep, adv, color="#d62728", marker="o", ms=3, label="adv rel-L2 (median)")
-    l2, = ax.plot(ep, clean, color="#1f77b4", marker="o", ms=3, label="clean rel-L2 (median)")
+    l1, = ax.plot(ep, adv, color="#d62728", marker="o", ms=3, label=f"adv {what} (median)")
+    l2, = ax.plot(ep, clean, color="#1f77b4", marker="o", ms=3, label=f"clean {what} (median)")
     ax.set_xlabel("training epoch")
-    ax.set_ylabel("reconstruction rel-L2")
+    ax.set_ylabel(f"reconstruction {what}")
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     ax.grid(True, alpha=0.3)
 
     ax2 = ax.twinx()
@@ -1030,12 +1051,25 @@ def save_epoch_attackability_plot(csv_path, out_path) -> None:
 
 def save_epoch_study_plots(attacks_root) -> None:
     """Render every epoch_study/{init}_{model}.csv under a tree into an
-    attackability-vs-epoch figure. No-op when the study was not run."""
+    attackability-vs-epoch figure. No-op when the study was not run.
+
+    The figures of one run that plot the same error share its axis, from zero to
+    just above the largest error of any model, so the models can be read against
+    each other."""
     d = Path(attacks_root) / "epoch_study"
     if not d.is_dir():
         return
-    for csvp in sorted(d.glob("*.csv")):
-        save_epoch_attackability_plot(csvp, d / (csvp.stem + ".png"))
+    by_channel: Dict[str, List[Path]] = {}
+    for p in sorted(d.glob("*.csv")):
+        by_channel.setdefault(_epoch_study_channel(p), []).append(p)
+    for channel, paths in by_channel.items():
+        keys = _epoch_study_error_keys(channel)
+        top = max((v for p in paths for r in read_epoch_study_csv(p)
+                   for v in (r.get(k, float("nan")) for k in keys)
+                   if np.isfinite(v)), default=None)
+        ylim = (0.0, 1.05 * top) if top else None
+        for csvp in paths:
+            save_epoch_attackability_plot(csvp, d / (csvp.stem + ".png"), ylim=ylim)
 
 
 # --------------------------------------------------------------------------- #

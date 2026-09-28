@@ -664,11 +664,16 @@ def summarize_metrics(rows: List[Dict[str, float]]) -> Dict[str, float]:
 # them to the orthogonal complement N(A_la)^perp, where the NSN's correction is
 # identically zero by construction. "full" leaves the correction unrestricted,
 # which is the plain local Lipschitz constant of the learned correction.
-LIPSCHITZ_RESTRICTIONS = ("null", "range", "full")
+# "cross" takes the input from N(A_la)^perp and the output in N(A_la): the gain
+# from the measured part of the input into the unmeasured part of the output,
+# which is the one a null-space attack exploits, since x_init = A^+ y always
+# lies in N(A_la)^perp.
+LIPSCHITZ_RESTRICTIONS = ("null", "range", "full", "cross")
 
 
 def image_projector(radon, restriction: str) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Image-space projector for one of ``LIPSCHITZ_RESTRICTIONS``.
+    """Image-space projector for one of the symmetric restrictions (null, range,
+    full), which confine input and output to the same subspace.
 
     The range projector is built as I - P_null rather than from the SVD factors
     directly, so the two are exactly complementary (P_ran + P_null = I to
@@ -681,8 +686,20 @@ def image_projector(radon, restriction: str) -> Callable[[torch.Tensor], torch.T
         return lambda v: v - radon.proj_null_image(v)
     if restriction == "full":
         return lambda v: v
-    raise ValueError(f"unknown Lipschitz restriction {restriction!r}, "
-                     f"expected one of {LIPSCHITZ_RESTRICTIONS}")
+    raise ValueError(f"unknown symmetric Lipschitz restriction {restriction!r}, "
+                     f"expected one of ('null', 'range', 'full')")
+
+
+def restriction_projectors(radon, restriction: str) -> Tuple[
+        Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    """(input projector, output projector) for any of ``LIPSCHITZ_RESTRICTIONS``."""
+    if restriction == "cross":
+        return image_projector(radon, "range"), image_projector(radon, "null")
+    if restriction not in LIPSCHITZ_RESTRICTIONS:
+        raise ValueError(f"unknown Lipschitz restriction {restriction!r}, "
+                         f"expected one of {LIPSCHITZ_RESTRICTIONS}")
+    proj = image_projector(radon, restriction)
+    return proj, proj
 
 
 def parse_lipschitz_restrictions(spec: str) -> List[str]:
@@ -703,16 +720,18 @@ def estimate_lipschitz(
     n_samples: int,
     n_iters: int,
     proj: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    out_proj: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
 ) -> Dict[str, float]:
     """Operator-norm (local Lipschitz) estimate of the *learned correction*,
     restricted to whichever subspace ``proj`` projects onto.
 
     Linearise the correction  g(x) = f(x) - x  (= P_null(UNet(x)) for the NSN,
-    UNet(x) for the ResNet) around the clean init x0, restrict both input and
-    output with the same projector P = ``proj``, and estimate the largest
-    singular value of  M = P . J_g . P  by power iteration:
+    UNet(x) for the ResNet) around the clean init x0, restrict the input with
+    P_in = ``proj`` and the output with P_out = ``out_proj`` (default: the same
+    projector), and estimate the largest singular value of
+    M = P_out . J_g . P_in  by power iteration:
 
-        d <- P d / ||.|| ;   repeat:  u = M d ,  d = M^T u / ||.|| ;   sigma ~ ||M d||.
+        d <- P_in d / ||.|| ;   repeat:  u = M d ,  d = M^T u / ||.|| ;   sigma ~ ||M d||.
 
     Attack-independent: it measures how strongly an input perturbation in that
     subspace can be amplified into output error in the same subspace, which is
@@ -728,9 +747,11 @@ def estimate_lipschitz(
 
     ``clean_cache`` entries only need to supply (x_gt, x_init, ...) as their
     first two elements. ``n_samples`` clean reconstructions are linearised and
-    ``n_iters`` power iterations are run at each.
+    ``n_iters`` power iterations are run at each. The per-point estimates are
+    returned under ``values`` as well, in the order of the cache.
     """
     proj = radon.proj_null_image if proj is None else proj
+    out_proj = proj if out_proj is None else out_proj
     samples: List[float] = []
 
     for entry in clean_cache:
@@ -742,29 +763,31 @@ def estimate_lipschitz(
 
             def G(x: torch.Tensor) -> torch.Tensor:
                 # learned correction, output restricted to the chosen subspace
-                return proj(model(x) - x)
+                return out_proj(model(x) - x)
             d = proj(torch.randn_like(x0))
             d = d / (torch.linalg.norm(d.reshape(-1)) + 1e-12)
             for _ in range(n_iters):
                 _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
-                _, w = torch.autograd.functional.vjp(G, x0, proj(u), strict=False)
+                _, w = torch.autograd.functional.vjp(G, x0, out_proj(u), strict=False)
                 w = proj(w)
                 nw = torch.linalg.norm(w.reshape(-1))
                 if nw < 1e-12:
                     break
                 d = w / nw
             _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
-            samples.append(float(torch.linalg.norm(proj(u).reshape(-1)).item()))
+            samples.append(float(torch.linalg.norm(out_proj(u).reshape(-1)).item()))
         if len(samples) >= n_samples:
             break
 
     if not samples:
-        return {"mean": float("nan"), "max": float("nan"), "std": float("nan"), "n": 0}
+        return {"mean": float("nan"), "max": float("nan"), "std": float("nan"), "n": 0,
+                "values": []}
     return {
         "mean": float(np.mean(samples)),
         "max": float(np.max(samples)),
         "std": float(np.std(samples)),
         "n": len(samples),
+        "values": samples,
     }
 
 
@@ -986,6 +1009,11 @@ def run_suite(args, radon, summary: Dict,
     out_root = attacks_root / f"init_{INIT_NAME}"
     out_root.mkdir(parents=True, exist_ok=True)
 
+    if getattr(args, "lipschitz_only", False):
+        write_lipschitz(args, models, input_cache, radon, out_root)
+        print(f"[suite] Lipschitz only, attacks skipped -> {out_root}")
+        return True
+
     for attack_name in _SUITE_ATTACKS:
         attack_dir = out_root / attack_name
         attack_dir.mkdir(parents=True, exist_ok=True)
@@ -1151,28 +1179,42 @@ def run_suite(args, radon, summary: Dict,
             model_names=model_names, attack_name=attack_name,
             eps=eps_nominal, T=T, n_ex=n_ex, gt_stack=gt_stack, recon=recon)
 
-    
-    # One estimate per model per subspace: the null-restricted gain is the
-    # comparable one, the other two say how much of it is the architecture.
-    restrictions = parse_lipschitz_restrictions(args.lipschitz_restrictions)
+
+    write_lipschitz(args, models, input_cache, radon, out_root)
+
+    print(f"[suite] done -> {out_root}")
+    return True
+
+
+def write_lipschitz(args, models: Dict[str, nn.Module], input_cache: List[Tuple],
+                    radon, out_root: Path) -> None:
+    """One estimate per model per subspace, merged into ``out_root/lipschitz.json``.
+
+    The null-restricted gain is the comparable one, range and full say how much
+    of it is the architecture, and cross is the gain a null-space attack
+    exploits. Restrictions not estimated in this call keep the values already in
+    the file, so a --lipschitz-only run can add one restriction to a finished run."""
+    path = out_root / "lipschitz.json"
     lip_res: Dict[str, Dict[str, Dict[str, float]]] = {}
-    for name in model_names:
-        lip_res[name] = {}
-        for restriction in restrictions:
+    if path.exists():
+        lip_res = json.loads(path.read_text(encoding="utf-8"))
+        # the older flat schema {mean, ...} per model was the null-restricted gain
+        lip_res = {m: ({"null": e} if "mean" in e else e) for m, e in lip_res.items()}
+    for name, model in models.items():
+        entry = lip_res.setdefault(name, {})
+        for restriction in parse_lipschitz_restrictions(args.lipschitz_restrictions):
+            in_proj, out_proj = restriction_projectors(radon, restriction)
             r = estimate_lipschitz(
-                model=models[name], clean_cache=input_cache, radon=radon,
+                model=model, clean_cache=input_cache, radon=radon,
                 n_samples=args.lipschitz_samples, n_iters=args.lipschitz_iters,
-                proj=image_projector(radon, restriction))
-            lip_res[name][restriction] = r
+                proj=in_proj, out_proj=out_proj)
+            entry[restriction] = r
             print(f"[suite][lipschitz] {name} [{restriction}] mean={r['mean']:.4g} "
                   f"max={r['max']:.4g} (n={r['n']})")
     if lip_res:
         # Plotted later by visualise.render_tree from this json.
-        with open(out_root / "lipschitz.json", "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(lip_res, f, indent=2)
-
-    print(f"[suite] done -> {out_root}")
-    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -1309,21 +1351,38 @@ def load_epoch_history(model_dir: Optional[str],
             for h in blob.get("history", [])}
     return hist, blob.get("best_epoch")
 
+# Objectives the epoch study can attack with: those that need no per-batch
+# target image.
+_EPOCH_OBJECTIVES = {"mse", "null", "range", "zero"}
+
+
+def epoch_study_csv_name(model_name: str, objective: str = "mse") -> str:
+    """epoch_study/{init}_{model}.csv for the total-error attack, the name every
+    finished run already has; {init}_{model}_{objective}.csv for any other."""
+    suffix = "" if objective == "mse" else f"_{objective}"
+    return f"{INIT_NAME}_{model_name}{suffix}.csv"
+
+
 def run_epoch_study(args) -> None:
     """Attack every saved epoch of each model individually and tabulate the
     adversarial error vs epoch alongside the train/val loss.
 
     This isolates *when* attackability arises during training and whether it
     tracks overfitting (validation loss diverging from training loss). For each
-    model it loads every {model}_epoch{NNN}.pt, runs one PGD attack (total-error
-    objective) on the shared sample cache, and writes
-    epoch_study/pinv_{model}.csv (rendered by visualise.save_epoch_study_plots).
-    Requires train.py to have been run with --checkpoint-every N."""
+    model it loads every {model}_epoch{NNN}.pt, runs one PGD attack
+    (``--epoch-objective``, by default the total error) on the shared sample
+    cache, and writes epoch_study/{epoch_study_csv_name} (rendered by
+    visualise.save_epoch_study_plots). Requires train.py to have been run with
+    --checkpoint-every N."""
     setup = prepare_run(args)
     device, radon = setup.device, setup.radon
     out_root = setup.out_root
 
     eps_nominal = EPOCH_EPS
+    objective = getattr(args, "epoch_objective", "mse")
+    if objective not in _EPOCH_OBJECTIVES:
+        raise ValueError(f"--epoch-objective {objective!r}, expected one of "
+                         f"{sorted(_EPOCH_OBJECTIVES)}")
 
     study_dir = out_root / "epoch_study"
     study_dir.mkdir(parents=True, exist_ok=True)
@@ -1350,7 +1409,8 @@ def run_epoch_study(args) -> None:
                   f"(train with --checkpoint-every N), skipping.")
             continue
         hist, best_epoch = load_epoch_history(args.model_dir, model_name)
-        print(f"\n[epoch-study] model '{model_name}': {len(ckpts)} epochs")
+        print(f"\n[epoch-study] model '{model_name}': {len(ckpts)} epochs, "
+              f"objective={objective}")
         rows_out: List[Dict[str, float]] = []
         for epoch, ckpt_path in ckpts:
             model = build_models([model_name], radon=radon)[model_name].to(device)
@@ -1367,7 +1427,7 @@ def run_epoch_study(args) -> None:
                     adapter=adapter, x_gt=x_gt, y_clean=y_clean,
                     clean_pred=clean_pred, eps=eps_batch,
                     alpha=suite_step_size(eps_batch),
-                    objective="mse")
+                    objective=objective)
                 with torch.no_grad():
                     adv_pred, adv_init, y_adv = adapter.forward(result.y_adv)
                 rows.extend(evaluate_batch(
@@ -1390,11 +1450,14 @@ def run_epoch_study(args) -> None:
                 "adv_consistency_rel_median": m.get("adv_consistency_rel_median", float("nan")),
                 "adv_consistency_vs_clean_rel_median": m.get(
                     "adv_consistency_vs_clean_rel_median", float("nan")),
+                # the null-space channel, which the null objective attacks
+                "clean_rel_l2_nul_median": m.get("clean_rel_l2_nul_median", float("nan")),
+                "adv_rel_l2_nul_median": m.get("adv_rel_l2_nul_median", float("nan")),
             })
             print(f"  epoch {epoch:03d}  val={va:.5f}  adv_rel_l2(med)="
                   f"{rows_out[-1]['adv_rel_l2_median']:.4f}  ratio(med)="
                   f"{rows_out[-1]['rel_l2_ratio_median']:.3f}")
-        csv_path = study_dir / f"{INIT_NAME}_{model_name}.csv"
+        csv_path = study_dir / epoch_study_csv_name(model_name, objective)
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
             writer.writeheader()
@@ -1489,7 +1552,19 @@ def parse():
                              f"{', '.join(LIPSCHITZ_RESTRICTIONS)}. 'null' is the "
                              "architecture-comparable number, 'range' and 'full' say how "
                              "much of the comparison is the architecture rather than the "
-                             "learned map. Each one costs a full pass of power iterations.")
+                             "learned map, and 'cross' (input in N(A)^perp, output in "
+                             "N(A)) is the gain a null-space attack exploits. Each one "
+                             "costs a full pass of power iterations.")
+    parser.add_argument("--lipschitz-only", action="store_true",
+                        help="Skip the attacks and only estimate the Lipschitz gains of "
+                             "the best checkpoints, merging them into an existing "
+                             "lipschitz.json. Takes minutes rather than hours.")
+    parser.add_argument("--epoch-objective", default="mse",
+                        choices=sorted(_EPOCH_OBJECTIVES),
+                        help="PGD objective of --epoch-study. 'mse' (the total error) "
+                             "writes epoch_study/pinv_<model>.csv; any other writes "
+                             "epoch_study/pinv_<model>_<objective>.csv next to it. 'null' "
+                             "is the one informative about the NSN's learned correction.")
     args = parser.parse_args()
     # Validated here rather than at the Lipschitz stage: that stage runs after
     # hours of attacking, and a typo there would throw the run away.

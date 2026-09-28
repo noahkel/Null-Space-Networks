@@ -952,6 +952,32 @@ def test_epoch_study_plot(tmp_path):
     assert len(V.read_epoch_study_csv(sd / "fbp_nsn.csv")) == 4
 
 
+def test_epoch_study_of_another_objective_gets_its_own_file():
+    """The total-error study keeps the name every finished run has."""
+    assert attack.epoch_study_csv_name("nsn") == f"{attack.INIT_NAME}_nsn.csv"
+    assert attack.epoch_study_csv_name("nsn", "null") == f"{attack.INIT_NAME}_nsn_null.csv"
+
+
+def test_epoch_study_plots_the_null_channel_of_a_null_attack(tmp_path):
+    V = _vis()
+    sd = tmp_path / "epoch_study"
+    sd.mkdir()
+    rows = [{"epoch": e, "train_loss": 1.0 / e, "val_loss": 0.5 / e, "is_best": 0,
+             "clean_rel_l2_median": 0.3, "adv_rel_l2_median": 1.2,
+             "clean_rel_l2_nul_median": 0.01, "adv_rel_l2_nul_median": 0.3 + 0.01 * e}
+            for e in (1, 2, 3)]
+    for name in ("pinv_nsn.csv", "pinv_nsn_null.csv"):
+        with open(sd / name, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+    assert V._epoch_study_error_keys(V._epoch_study_channel(sd / "pinv_nsn_null.csv")) == (
+        "adv_rel_l2_nul_median", "clean_rel_l2_nul_median")
+    assert V._epoch_study_channel(sd / "pinv_nsn.csv") == ""
+    V.save_epoch_study_plots(tmp_path)
+    assert (sd / "pinv_nsn.png").exists() and (sd / "pinv_nsn_null.png").exists()
+
+
 # --------------------------------------------------------------------------- #
 # Run-log follow-ups (job 20585). Each test pins one defect the six-day full run
 # exposed, so a future run cannot silently reintroduce it.
@@ -1640,6 +1666,58 @@ def test_lipschitz_restrictions_are_parsed_in_a_fixed_order(radon):
         attack.parse_lipschitz_restrictions("null,sideways")
     with pytest.raises(ValueError):
         attack.image_projector(radon, "sideways")
+    assert attack.parse_lipschitz_restrictions("cross,null") == ["null", "cross"]
+
+
+def test_lipschitz_cross_matches_the_projected_operator_norm(radon):
+    """cross takes the input from null(A)^perp and the output in null(A):
+    the estimate must reproduce the largest singular value of P_N M P_R."""
+    model = _LinearCorrection(radon)
+    Pn = _projector_matrix(radon, "null").numpy()
+    Pr = _projector_matrix(radon, "range").numpy()
+    expected = np.linalg.svd(Pn @ model.M.numpy() @ Pr, compute_uv=False)[0]
+
+    in_proj, out_proj = attack.restriction_projectors(radon, "cross")
+    x_init = torch.randn(1, 1, radon.IMG, radon.IMG, dtype=torch.float64)
+    res = attack.estimate_lipschitz(
+        model=model, clean_cache=[(x_init, x_init)], radon=radon,
+        n_samples=1, n_iters=200, proj=in_proj, out_proj=out_proj)
+    assert res["mean"] == pytest.approx(expected, rel=1e-4)
+    assert res["values"] == [res["mean"]]
+
+
+def test_lipschitz_of_a_null_space_correction_splits_over_its_input(radon):
+    """The bound the thesis draws from the table: for a correction with output
+    in null(A), ||J||^2 <= ||J P_N||^2 + ||J P_R||^2, and J P_R is the cross gain."""
+    model = _LinearCorrection(radon, project=True)
+    x_init = torch.randn(1, 1, radon.IMG, radon.IMG, dtype=torch.float64)
+    kw = dict(model=model, clean_cache=[(x_init, x_init)], radon=radon,
+              n_samples=1, n_iters=300)
+    gains = {}
+    for r in ("null", "full", "cross"):
+        in_proj, out_proj = attack.restriction_projectors(radon, r)
+        gains[r] = attack.estimate_lipschitz(proj=in_proj, out_proj=out_proj, **kw)["mean"]
+    assert gains["full"] ** 2 <= gains["null"] ** 2 + gains["cross"] ** 2 + 1e-6
+    assert gains["cross"] >= gains["full"] - gains["null"] - 1e-6
+
+
+def test_lipschitz_only_run_merges_into_an_existing_file(radon, tmp_path):
+    """--lipschitz-only with one restriction adds it and keeps the others."""
+    (tmp_path / "lipschitz.json").write_text(json.dumps(
+        {"nsn": {"null": {"mean": 1.0, "max": 2.0, "std": 0.1, "n": 3}},
+         "resnet": {"mean": 5.0, "max": 6.0, "std": 0.2, "n": 3}}), encoding="utf-8")
+    args = argparse.Namespace(lipschitz_restrictions="cross",
+                              lipschitz_samples=1, lipschitz_iters=5)
+    x_init = torch.randn(1, 1, radon.IMG, radon.IMG, dtype=torch.float64)
+    models = {"nsn": _LinearCorrection(radon, project=True),
+              "resnet": _LinearCorrection(radon)}
+    attack.write_lipschitz(args, models, [(x_init, x_init)], radon, tmp_path)
+
+    lip = json.loads((tmp_path / "lipschitz.json").read_text(encoding="utf-8"))
+    assert lip["nsn"]["null"]["mean"] == 1.0
+    assert lip["resnet"]["null"]["mean"] == 5.0   # the old flat schema was null
+    assert set(lip["nsn"]) == {"null", "cross"}
+    assert lip["resnet"]["cross"]["n"] == 1
 
 
 # =========================================================================== #
