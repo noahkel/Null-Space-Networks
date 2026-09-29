@@ -915,8 +915,8 @@ def mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 \end{lstlisting}
 %PersonalTODO: Look into Adam Optimizer
 Here the tensor $\texttt{pred}$ is the reconstruction and $\texttt{target}$ is the ground truth. The model parameters are trained with the Adam optimiser \parencite{Adam}, which adapts a per-parameter step size from running estimates of the first and second moments of the gradient. In PyTorch the optimiser is created as
-\begin{lstlisting}[language=Python, caption=mse\_loss]
-    \texttt{torch.optim.Adam(model.parameters(), lr=0.0001)}.
+\begin{lstlisting}[language=Python, caption=Adam optimiser]
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 \end{lstlisting}
 In every step the gradient is reset to zero and recomputed by $\texttt{loss.backward()}$.
 The optimiser then updates the model parameters. We train for $50$ epochs with a batch size of $32$, without a learning-rate
@@ -1515,13 +1515,11 @@ $\lVert\mathbf{e}_{\mathcal{N}}\rVert$ & $\lVert\mathbf{e}_{\mathcal{N}^\perp}\r
 \end{tabular}
 \end{table}
 Judged by their total errors, the two architectures are far apart. The residual network reduces the
-relative $\ell_2$ error of the pseudoinverse by a factor between $18$ and $21$, from
-$0.3184$ to $0.0154$ at the lowest noise level and from $1.4796$ to $0.0741$ at the highest,
-and it holds an SSIM above $0.91$ everywhere. The Nullspace Network reduces the same error
-only from $0.3184$ to $0.1450$, and at $\sigma_{\text{rel}}=0.05$ hardly at all, from
-$1.4796$ to $1.4419$. The reason is the constraint of the Nullspace Network. The range component of its
-error is $0.1441$, $0.2882$, $0.5764$ and $1.4411$, exactly the range component of the pseudoinverse.
-The two agree to every digit printed, at every noise level, because they are the same number: with
+relative $\ell_2$ error of the pseudoinverse by a factor of about twenty at every noise level and keeps
+an SSIM above $0.9$. The Nullspace Network reduces it far less, and at $\sigma_{\text{rel}}=0.05$
+hardly at all. The reason is the constraint of the Nullspace Network: the range component of its
+error is exactly that of the pseudoinverse, to every digit printed in Table~\ref{tab:clean}, because
+the two are the same quantity. With
 $\hat{\mathbf{x}}=\mathbf{x}_0+\mathbf{P}_{\mathcal{N}(\mathbf{A})}N_\theta(\mathbf{x}_0)$ the
 correction has no component outside $\mathcal{N}(\mathbf{A})$, so
 \[(\mathbf{I}-\mathbf{P}_{\mathcal{N}(\mathbf{A})})(\hat{\mathbf{x}}-\mathbf{x}^\dagger)
@@ -1529,17 +1527,16 @@ correction has no component outside $\mathcal{N}(\mathbf{A})$, so
 identically. Measured per sample, the ratio
 $\lVert\mathbf{e}_{\mathcal{N}^\perp}\rVert/\lVert\mathbf{e}_{\mathcal{N}^\perp}^{\,\text{init}}\rVert$
 lies within $5\cdot10^{-7}$ of $1$ for the Nullspace Network in all nine runs of this work and under
-all five attacks, clean and attacked alike. This is what the proposition predicts, and it confirms
+all five attacks, clean and attacked alike. This is what the identity above predicts, and it confirms
 numerically that the implementation meets its hypotheses and that the Nullspace Network is data consistent.
 The unconstrained residual network removes more than $90\%$ of the range component, which is what gives it the far smaller total error.\\
 The null-space component of the pseudoinverse error, $0.2736$, is the same at all four noise levels.
 The reason is that $\mathbf{x}_\text{init}=\mathbf{A}^{+}\mathbf{y}^\delta$ lies in $\operatorname{range}(\mathbf{V}_k)$, so
 $\mathbf{P}_{\mathcal{N}(\mathbf{A})}(\mathbf{x}_\text{init}-\mathbf{x}^\dagger)=-\mathbf{P}_{\mathcal{N}(\mathbf{A})}\mathbf{x}^\dagger$:
 this component is the part of the phantom the truncated operator never measures, and the noise cannot reach it.
-The four datasets share their phantoms, so the value is not merely the same in expectation but the same to four digits.\\
-On the channel the Nullspace Network does control, the picture reverses. Its clean
-null-space error is $0.0083$, $0.0092$, $0.0171$ and $0.0244$ against the residual network's
-$0.0105$, $0.0160$, $0.0263$ and $0.0526$, lower at every noise level and by a factor of two at the highest.
+The four datasets share their phantoms, so the value is not merely the same in expectation but identical to every digit printed.\\
+On the channel the Nullspace Network does control, the picture reverses. Its clean null-space error
+is lower than that of the residual network at every noise level, by up to a factor of two at the highest.
 Restricted to the component it can correct, the Nullspace Network outperforms the unconstrained residual network;
 it spends all of its capacity there, while the residual network also has to correct the range component.
 Every total error of the Nullspace Network in Table~\ref{tab:clean}
@@ -1551,23 +1548,20 @@ maps, which is why we focus on the error decomposition from here on.
 Figure~\ref{fig:consistency} shows the data-consistency residual $r(\hat{\mathbf{x}},\mathbf{y})$ of
 Section~\ref{sec:metrics} against the sinogram each reconstruction was computed from, at
 $\sigma_\text{rel}=0.01$. For the Nullspace Network it is zero to rounding, clean and attacked
-alike, as $\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})}=0$ demands. Its median is
-$2.0\cdot10^{-6}$ clean and $1.6\cdot10^{-6}$ attacked, the level of single-precision rounding, so its
-bars are too small to be visible.
-The residual U-Net has a clean residual of $0.012$ (median). This is close to what a
+alike, as $\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}(\mathbf{A})}=0$ demands. Its median is of the
+order of $10^{-6}$, the level of single-precision rounding, so its bars are too small to be visible.
+The residual U-Net has a clean median residual of $0.012$, close to the noise level. This is what a
 good reconstruction should have. We can see this by assuming $\hat{\mathbf{x}}$ to be the ground truth itself. Its residual
-against the noisy sinogram would be then be
+against the noisy sinogram would then be
 $\lVert\mathbf{P}_k(\mathbf{A}\mathbf{x}^\dagger-\mathbf{y}^\delta)\rVert_2/\lVert\mathbf{P}_k\mathbf{y}^\delta\rVert_2$,
 the relative size of the noise, which is about $\sigma_\text{rel}=0.01$. A residual near the noise
 level therefore means that the residual network does not reproduce the noise, whereas the Nullspace
 Network, whose range component is that of $\mathbf{A}^{+}\mathbf{y}^\delta$, reproduces it exactly.\\
-Under the untargeted attack the residual of the residual U-Net rises to $0.089$, almost eight times
-its clean value and nine times the noise level.
-By the triangle inequality of Section~\ref{sec:metrics} its residual
+Under the untargeted attack the residual of the residual U-Net rises almost eightfold, to nine times
+the noise level. By the triangle inequality of Section~\ref{sec:metrics} its residual
 against the unattacked sinogram lies within about $\varepsilon=0.01$ of this value, so the attacked
 reconstruction explains neither sinogram. The other noise levels behave alike: the clean residual
-stays close to the noise level, at $0.0059$, $0.021$ and $0.051$ for $\sigma_\text{rel}=0.005$, $0.02$
-and $0.05$, and the attack raises it by a factor between $4$ and $11$, to $0.064$, $0.16$ and $0.22$.
+stays close to the noise level, and the attack raises it four- to elevenfold.
 %This has a practical side. The residual against the
 %sinogram the method was given can be computed without knowing the ground truth, so for the residual
 %network an attack leaves a trace that a simple consistency check could in principle detect. The trace
@@ -1624,26 +1618,29 @@ target: other sample   & 0.2487 & 0.1425 & 0.1994 & 0.3038 & 0.2416 & 0.1579 \\
 \end{tabular}
 \end{table}
 \paragraph{The untargeted attack.} Against the residual U-Net, the untargeted attack raises the
-median relative error from $0.019$ to $0.43$, a factor of about $22$ at a perturbation as large as
-the noise the network was trained on. The error grows biggest in the null-space: its null-space
-component grows from $0.012$ to $0.37$, its range component from $0.015$ to $0.20$
+median relative error by a factor of about $22$, at a perturbation as large as the noise the network
+was trained on (Table~\ref{tab:attacks}). Most of the damage is done in the null space: the
+null-space component of the error grows thirtyfold, the range component fourteenfold
 (Figure~\ref{fig:decomp-mse}). The attack thus makes the residual network produce structure that
 the measurements cannot see.\\
-Against the Nullspace Network the same attack raises the total error from $0.28$ to $1.24$, which
-taken at face value would make the Nullspace Network the far more vulnerable of the two. The
-decomposition shows otherwise. The null-space component of its error grows only from $0.0065$ to
-$0.031$, and practically the entire error, $1.23$, is range component. This is the reason for the subspace attacks of
+Against the Nullspace Network the same attack more than quadruples the total error, which taken at
+face value would make the Nullspace Network the far more vulnerable of the two. The decomposition
+shows otherwise: practically the entire attacked error is range component, while the null-space
+component stays small. This is the reason for the subspace attacks of
 Section~\ref{sec:subspace}: whatever the network does, the range component of its error moves by
 $\mathbf{A}^{+}\boldsymbol{\delta}$ and by nothing else, and an attack on the total error finds it
 cheapest to grow that component.\\
-Due to the reconstruction with the pseudoinverse, the total growth of the range component error can be bound by $\varepsilon\cdot(1+\sigma_\text{rel})\cdot(1/\tau)$, where $\varepsilon=\sigma_\text{rel}=0.01$ and $\tau=4\cdot10^{-3}$, 
-in units of $\lVert\mathbf{x}^\dagger\rVert_2$. The observed growth has a median of $0.96$ and a maximum of
-$1.67$ over the $128$ samples, so the largest reaches two thirds of the bound.
-Table~\ref{tab:prop} shows the same at every noise level and in the further runs of
-Sections~\ref{sec:results-tau} and~\ref{sec:results-data}.
-%TODO: Understand how 96 is found
-At all four noise levels the median growth is
-$96\,\varepsilon$, linear in the budget, as befits a component that depends on the perturbation only
+Due to the reconstruction with the pseudoinverse, the growth of the range component of the error is
+bounded by $\varepsilon(1+\sigma_\text{rel})/\tau$ in units of $\lVert\mathbf{x}^\dagger\rVert_2$, since
+$\lVert\mathbf{A}^{+}\rVert_2\leq1/(\tau\sigma_{\max})$. The largest observed growth reaches two thirds
+of this bound and the median $38\%$ of it (Table~\ref{tab:prop}). The gap has two sources. The attack
+realises about $85\%$ of the worst case $\lVert\boldsymbol{\delta}\rVert_2/\sigma_{\min}$ of each sample,
+and a single-ellipse sinogram has only about $45\%$ of the norm
+$(1+\sigma_\text{rel})\,\sigma_{\max}\lVert\mathbf{x}^\dagger\rVert_2$ the bound allows for. Neither
+factor depends on the noise level, and the budget
+$\varepsilon\lVert\mathbf{P}_k\mathbf{y}^\delta\rVert_2$ of Section~\ref{sec:adversarial} is
+proportional to $\varepsilon$, so at all four noise levels the median growth is the same multiple of
+the budget, $96\,\varepsilon$, as befits a component that depends on the perturbation only
 through the linear map $\mathbf{A}^{+}$. The untargeted attack against the Nullspace Network thus
 does not measure the network, but the pseudoinverse. A comparison of total adversarial errors between the
 two architectures is for this reason as meaningless as the comparison of clean totals in
@@ -1685,20 +1682,18 @@ multi-ellipse  & $2.5\cdot10^{-2}$ & $0.01$  & 0.091 & 0.110 & 0.404  & 0.974 \\
 \end{figure}
 
 \paragraph{The null-space attack.} Restricted to the null space, the attack meets the two networks on
-the ground where both act. The result is shown in Figure~\ref{fig:decomp-null} and in the absolute
-numbers of Figure~\ref{fig:null-growth}. For the Nullspace Network the median null-space error rises
-from $0.0065$ to $0.37$, by a factor of more than $50$. For the residual network it rises from $0.012$ to
-$0.37$ as well. In absolute terms the median null-space error grows by $6.51$ for the residual
-network and by $6.27$ for the Nullspace Network.\\
-Both networks are attacked on the same samples. The per-sample growths are skewed and scatter widely; their means,
-$12.1\pm2.5$ for the residual network and $11.4\pm2.4$ for the Nullspace Network, have intervals that
-overlap almost entirely. Their paired difference, residual network minus Nullspace Network, is
-$0.75\pm0.50$ with the interval of Section~\ref{sec:metrics}, and the
-growth of the Nullspace Network is the smaller one on $62\%$ of the samples. The difference is
-therefore just distinguishable from sampling error, but small compared with the growth itself, and it
-is not stable. Table~\ref{tab:robustness} shows it vanish at $\sigma_\text{rel}=0.02$ and change sign
-at $\sigma_\text{rel}=0.05$, where the null-space error of the Nullspace Network grows by $10\%$ more
-than that of the residual network.\\
+the ground where both act (Figures~\ref{fig:decomp-null} and~\ref{fig:null-growth}). It drives the
+median null-space error of both networks to the same level: that of the Nullspace Network rises more
+than fiftyfold, that of the residual network thirtyfold, since the Nullspace Network starts from half
+the clean null-space error.\\
+Both networks are attacked on the same samples, so their growths can be compared sample by sample.
+The per-sample growths are skewed and scatter widely, and the confidence intervals of their means
+overlap almost entirely. Their paired difference (Table~\ref{tab:robustness}) is just
+distinguishable from sampling error, in favour of the Nullspace Network, whose growth is the smaller
+one on $62\%$ of the samples. But it is small compared with the growth itself, about $7\%$ of it, and
+it is not stable: it vanishes at $\sigma_\text{rel}=0.02$ and changes sign at $\sigma_\text{rel}=0.05$,
+where the null-space error of the Nullspace Network grows by $10\%$ more than that of the residual
+network.\\
 The main result is plain: an attacker with a budget as large as the noise can drive the null-space
 error of both networks to about the same level, although the Nullspace Network starts from half the
 clean null-space error of the residual network. At the four noise levels the attacked null-space
@@ -1733,19 +1728,18 @@ multi  & $2.5\cdot10^{-2}$ & $0.01$  & 0.1036 & 0.8253 & 0.0982 & 0.9389 & $-0.1
 \bottomrule
 \end{tabular}
 \end{table}
-Two further observations complete the picture. First, the null-space attack also raises the range
-component of the Nullspace Network, from $0.28$ to $0.72$. Every perturbation moves the range component
-by $\mathbf{A}^{+}\boldsymbol{\delta}$, whether or not the loss rewards it.
+Two further observations complete the picture. First, the null-space attack also more than doubles
+the range component of the Nullspace Network (Table~\ref{tab:attacks}). Every perturbation moves the
+range component by $\mathbf{A}^{+}\boldsymbol{\delta}$, whether or not the loss rewards it.
 Second, for the residual network the null-space attack and the untargeted
-attack end in nearly the same place, $0.42$, $0.20$ and $0.37$ for total, range and null-space error.
+attack end in nearly the same place, in all three components.
 The untargeted attack on the residual network is thus already favoring the null-space channel,
 which is where the damage is cheapest.\\
 Figure~\ref{fig:ghost} shows the fraction $\lVert\mathbf{e}_\mathcal{N}\rVert_2/\lVert\mathbf{e}\rVert_2$
-of the attacked error per sample. For the residual network it rises from $0.64$ to a median of
-$0.884$, with the middle half of the samples between $0.85$ and $0.91$: under attack almost all of
-its error is invisible to the measurements. For the Nullspace Network it rises from $0.023$ to a
-median of $0.47$, with a much wider spread from $0.32$ to $0.66$, because the range component grows
-alongside.
+of the attacked error per sample. For the residual network it rises from about two thirds to a median
+of $0.88$, with little spread: under attack almost all of its error is invisible to the measurements.
+For the Nullspace Network it rises from almost zero to a median of about one half, with a much wider
+spread, because the range component grows alongside.
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.85\textwidth]{figures/decomp_null.png}
@@ -1771,14 +1765,15 @@ alongside.
 
 \paragraph{Example.} Figures~\ref{fig:example-resnet} and~\ref{fig:example-nsn} show the first test
 sample under the null-space attack. The residual network reconstructs it almost perfectly when
-unattacked (relative error $0.017$, SSIM $0.991$). Attacked, its relative error rises to $0.378$,
-but its SSIM stays at $0.884$: the ellipse remains sharp and plausible, but its outline is deformed
+unattacked. Attacked, its relative error rises more than twentyfold, but its SSIM stays high, at
+$0.88$: the ellipse remains sharp and plausible, but its outline is deformed
 and a spurious, streak-like appendage extends from its lower right edge. This is the clinically
 dangerous kind of error, a clean-looking image of an object that is not there. The attack degrades
-the input far more before the network though, from $0.398$ to $0.817$; the residual network removes most of that
-degradation. The attacked Nullspace Network reconstruction (relative error $0.740$,
-SSIM $0.045$, up from $0.285$ and $0.240$) has far worse metrics, but its degradation is structurally very similar. In both examples the largest entries of the perturbation
-$\boldsymbol{\delta}$ lie on the first and the last measured projection angles, the two edges of the angular window.
+the input before the network far more, doubling the error of the initial reconstruction; the
+residual network removes most of that degradation. The attacked Nullspace Network reconstruction has
+far worse metrics, with an SSIM close to zero, but its degradation is structurally very similar. In
+both examples the largest entries of the perturbation $\boldsymbol{\delta}$ lie on the first and the
+last measured projection angles, the two edges of the angular window.
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\textwidth]{figures/example_resnet_null.png}
@@ -1796,17 +1791,16 @@ $\boldsymbol{\delta}$ lie on the first and the last measured projection angles, 
 \paragraph{The range attack and the five attacks side by side.} Figure~\ref{fig:channels} places every
 attacked sample of all five attacks in the plane of absolute range and null-space error. For the
 Nullspace Network the attacks separate cleanly. The untargeted attack and the attack on the range
-component spread along the range axis, to range errors of up to about $150$, while their null-space
-error stays small; only the null-space attack moves samples upwards, to null-space errors of
-more than $100$. For the residual network the attacks are hardly distinguishable. All of them, including
-the attack on the range component, damage both components together, with the null-space error
-typically as large as the range error or larger. The residual network does not keep the two
-channels apart, so an attacker who damages its measured part damages its unmeasured part as well.\\
-The medians of Table~\ref{tab:attacks} match the data. Against the Nullspace Network the range attack
-ends where the untargeted attack ends, at a total error of $1.24$, of which only $0.025$ is null-space
-error. Against the residual network it reaches a total error of $0.38$, and even there the null-space
-component, $0.30$, exceeds the range component it targets, $0.20$. The range component is no larger
-than under the untargeted attack, $0.205$ against $0.204$.
+component spread far along the range axis while their null-space error stays small; only the
+null-space attack moves samples upwards. For the residual network the attacks are hardly
+distinguishable. All of them, including the attack on the range component, damage both components
+together, with the null-space error typically as large as the range error or larger. The residual
+network does not keep the two channels apart, so an attacker who damages its measured part damages
+its unmeasured part as well.\\
+The medians of Table~\ref{tab:attacks} match this picture. Against the Nullspace Network the range
+attack ends where the untargeted attack ends, with almost no null-space error. Against the residual
+network, even the range attack leaves a null-space component larger than the range component it
+targets, and it grows the range component no more than the untargeted attack does.
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\textwidth]{figures/channels.png}
@@ -1818,55 +1812,53 @@ than under the untargeted attack, $0.205$ against $0.204$.
 \subsection{Targeted adversarial attack}\label{sec:results-targeted}
 In Figure~\ref{fig:channels} the samples of the two targeted attacks, towards the zero image and
 towards the ground truth of another sample, form the cluster closest to the origin for both
-networks, with absolute range errors below $12$ and null-space errors below $14$. Their
-damage is the smallest of all five attacks, this is expected, since reaching one
+networks. Their damage is the smallest of all five attacks. This is expected, since reaching one
 particular image is harder than leaving the ground truth in any direction. The medians of
-Table~\ref{tab:attacks} confirm this. For the residual network the attack towards the zero image
-raises the total error to $0.18$ and the attack towards another sample to $0.25$, against $0.43$ for the
-untargeted attack.\\
-For the Nullspace Network, whose clean total error is $0.28$, the attack towards the zero image leaves
-the total error practically unchanged at $0.27$, and the attack towards another sample raises it only
-to $0.30$. The decomposition shows why the totals hardly move. Both attacks raise the null-space error
-of the Nullspace Network from $0.0065$ to $0.18$ and $0.16$, but they lower its range error, from $0.28$
-to $0.21$ and $0.24$.\\
 %TODO: CHeck math of followoing paragraph
+Table~\ref{tab:attacks} confirm this: for the residual network the two targeted attacks reach about
+half the error of the untargeted attack.\\
+For the Nullspace Network the total error hardly moves at all: the attack towards the zero image
+leaves it practically unchanged, and the attack towards another sample raises it by a tenth. The
+decomposition shows why. Both attacks raise the null-space error of the Nullspace Network about
+25-fold, but they lower its range error, by a quarter and by an eighth.\\
 The reason is the way the pseudoinverse weights the measurement. The range component of the
 reconstruction is $\mathbf{A}^{+}(\mathbf{y}^\delta+\boldsymbol{\delta})$, and its coefficient along
 $\mathbf{v}_i$ is
 \[\mathbf{v}_i^{*}\mathbf{x}^\dagger+\frac{\mathbf{u}_i^{*}(\mathbf{y}^\delta-\mathbf{y})}{\sigma_i}
 +\frac{\mathbf{u}_i^{*}\boldsymbol{\delta}}{\sigma_i},\]
 the coefficient of the phantom, the amplified noise and the amplified perturbation. A targeted attack
-minimises the squared distance of the reconstruction to its target $\mathbf{t}$. The range component
-contributes to the gradient along $\mathbf{u}_i$ the residual $r_i$ of this coefficient against
-$\mathbf{v}_i^{*}\mathbf{t}$, divided once more by $\sigma_i$: to first order, a unit of budget spent
-along $\mathbf{u}_i$ reduces the squared distance by $2\lvert r_i\rvert/\sigma_i$. Both factors are largest at the
-smallest retained singular values. The noise is spread evenly over the directions $\mathbf{u}_i$, so
-there the amplified noise dominates the coefficient, and with it the residual, whatever the target.
-The gradient of a targeted attack therefore points mostly into the directions in which the pseudoinverse
-keeps amplified noise, which is part of no target, and cancelling it brings the range component closer
-to the ground truth as well. The zero image is the extreme case, since against it the residual is the
-whole coefficient. The attacked initial reconstruction of the first test
-sample is accordingly closer to the ground truth than the clean one, with a relative error of $0.351$
-against $0.398$ (Figure~\ref{fig:example-nsn-zero}). A targeted attack on the Nullspace Network thus
-denoises its range component as a side effect, while it damages the null-space component.\\
+minimises the squared distance of the reconstruction to its target $\mathbf{t}$, whose range part is
+the sum of the squared residuals $r_i$ of these coefficients against $\mathbf{v}_i^{*}\mathbf{t}$.
+Since $r_i$ depends on the perturbation through $\mathbf{u}_i^{*}\boldsymbol{\delta}/\sigma_i$, the
+derivative of $r_i^2$ with respect to $\mathbf{u}_i^{*}\boldsymbol{\delta}$ is $2r_i/\sigma_i$: to first
+order, a unit of budget spent along $\mathbf{u}_i$ reduces the range part of the squared distance by
+$2\lvert r_i\rvert/\sigma_i$. The noise is spread evenly over the directions $\mathbf{u}_i$, while the
+share $\sigma_i\mathbf{v}_i^{*}\mathbf{x}^\dagger$ of the phantom in the measurement shrinks with
+$\sigma_i$, so at the smallest retained singular values the amplified noise dominates the coefficient,
+and with it the residual, whatever the target. There both $1/\sigma_i$ and $\lvert r_i\rvert$ are
+largest, and the gain per unit of budget grows like $1/\sigma_i^2$. The gradient of a targeted attack
+therefore points mostly into the directions in which the pseudoinverse keeps amplified noise, which
+is part of no target, and cancelling it brings the range component closer to the ground truth as
+well. The attacked initial reconstruction of the first test sample is accordingly closer to the
+ground truth than the clean one (Figure~\ref{fig:example-nsn-zero}). A targeted attack on the
+Nullspace Network thus denoises its range component as a side effect, while it damages the
+null-space component.\\
 The other runs confirm this reading, since the effect depends on how far below the noise level the
 truncation reaches. By the heuristic of Section~\ref{sec:pinv}, a retained direction is dominated by
-noise if its relative singular value lies below $\sigma_\text{rel}$. The attack towards the zero image
-lowers the range error of the Nullspace Network on $86\%$ of the samples at $\sigma_\text{rel}=0.01$,
-where $\tau=0.4\,\sigma_\text{rel}$, and on $99\%$ or more at $\sigma_\text{rel}=0.02$ and $0.05$ and at
-$\tau=4.4\cdot10^{-4}$ (Section~\ref{sec:results-tau}), where $\tau\leq0.2\,\sigma_\text{rel}$. At
-$\sigma_\text{rel}=0.05$ it lowers the median range error from $1.39$ to $0.38$, and the attacked
-reconstruction is closer to the ground truth than the clean one on $98\%$ of the samples. Where $\tau$
-approaches or exceeds the noise level, the effect fades and reverses: the range error is lowered on
-$45\%$ of the samples at $\sigma_\text{rel}=0.005$, and on $25\%$ and $3\%$ at $\tau=1.1\cdot10^{-2}$
-and $6.2\cdot10^{-2}$, where its median rises, from $0.115$ to $0.157$ and from $0.052$ to $0.063$.\\
+noise if its relative singular value lies below $\sigma_\text{rel}$. Where $\tau$ lies far below the
+noise level, at $\sigma_\text{rel}=0.02$ and $0.05$ and at $\tau=4.4\cdot10^{-4}$
+(Section~\ref{sec:results-tau}), the attack towards the zero image lowers the range error of the
+Nullspace Network on practically every sample; at $\sigma_\text{rel}=0.05$ the attacked reconstruction
+is even closer to the ground truth than the clean one on $98\%$ of the samples. As $\tau$ approaches
+the noise level the effect fades, and where $\tau$ exceeds it, at $\tau=1.1\cdot10^{-2}$ and
+$6.2\cdot10^{-2}$, it reverses: there the attack raises the range error on most samples.\\
 Figure~\ref{fig:example-resnet-target} shows the first test sample under the attack towards another
-sample for the residual network. The relative error rises from $0.017$ to $0.289$, but the SSIM stays at
-$0.890$: the attacked reconstruction shows a bright, sharply bounded sliver attached to the left
+sample for the residual network. The relative error rises more than tenfold, but the SSIM stays near
+$0.9$: the attacked reconstruction shows a bright, sharply bounded sliver attached to the left
 of the ellipse. This is structure of the kind a real object could
 have, produced by a perturbation no larger than the noise. For the Nullspace Network
-(Figure~\ref{fig:example-nsn-zero}) the attack towards the zero image changes the relative error only
-from $0.285$ to $0.281$: the fine noise texture of the clean reconstruction is largely gone, and
+(Figure~\ref{fig:example-nsn-zero}) the attack towards the zero image leaves the relative error
+practically unchanged: the fine noise texture of the clean reconstruction is largely gone, and
 faint streaks run through the image instead.\\
 \begin{figure}[htbp]
     \centering
@@ -1889,42 +1881,39 @@ target, which is the actual measure of its success.
 Figure~\ref{fig:epoch} shows the result of the epoch study at $\sigma_\text{rel}=0.01$, where the fixed
 budget $\varepsilon=0.01$ of the study coincides with the noise level and the models are attacked with the untargeted attack.
 Neither network overfits. For both, the validation loss follows the training loss throughout the $50$ epochs,
-and the lowest validation loss is reached at epoch $49$ by the residual network and at epoch $50$ by the Nullspace
-Network. This means overfitting does not play a role in the attackability of our models.\\
+and the lowest validation loss is reached in one of the last two epochs. This means overfitting does
+not play a role in the attackability of our models.\\
 For the residual network the median adversarial error does not grow with training. After a rise during
-the first epochs, from about $0.66$ at epoch $1$ to a peak of about $1.05$ at epoch $8$, it falls,
-with large fluctuations from one epoch to the next, to about $0.44$ at epoch $50$. Over the same epochs
-the clean error falls from about $0.18$ to $0.02$. In absolute terms the network thus becomes more
-robust as it learns. Less so, if it is compared to its clean error, since the ratio of adversarial
-to clean error grows from about $4$ to about $22$. The are fluctuations between neighbouring epochs,
-which are large compared with the smooth loss curves.
+the first epochs to a peak at epoch $8$, it falls, with large fluctuations from one epoch to the next,
+to less than half of that peak, while the clean error falls by almost an order of magnitude. In
+absolute terms the network thus becomes more robust as it learns. Less so, if it is compared to its
+clean error: the ratio of adversarial to clean error grows about fivefold over training. The
+fluctuations between neighbouring epochs are large compared with the smooth loss curves.
 %PersonalTODO: Maybe adjust scale of y axis to be consistent
 This suggests that the attackability depends considerably on where exactly training stopped.\\
-For the Nullspace Network the median adversarial error is flat at about $1.27$ from the first epoch on, while
-the clean error falls only slightly, from about $0.32$ to $0.28$.
+For the Nullspace Network the median adversarial error is flat from the first epoch on, while
+the clean error falls only slightly.
 The epoch study attacks the total error, and against the Nullspace Network this
 attack grows the range component, which does not depend on the weights at all. The flat curve is
 therefore a statement about the pseudoinverse, not about training.
 An epoch study of the Nullspace Network that is informative about the network has to use the
 null-space attack, and at $\sigma_\text{rel}=0.01$ the study was repeated with it
 (Figure~\ref{fig:epoch-null}). Measured on the null-space component, the Nullspace Network behaves
-like the residual network. Its clean null-space error falls from $0.133$ at epoch $1$ to $0.007$ at
-epoch $50$. Its attacked null-space error rises over the first epochs, from $0.51$ to a peak of $0.88$
-at epoch $3$, and then falls, with large fluctuations, to $0.36$ at epoch $50$. The residual network,
-attacked in the same way, peaks at $0.94$ at epoch $8$ and ends at $0.39$, while its clean
-null-space error falls from $0.153$ to $0.013$. The ratio of attacked to clean null-space error grows
-over training from about $4$ to $54$ for the Nullspace Network and from about $3$ to $31$ for the
-residual network. Both learned corrections thus become more robust in absolute terms as they learn
-and less so relative to their clean error, and at the end of training their attacked null-space errors
-are close to each other, as in the attack suite of Section~\ref{sec:results-general}.\\
+like the residual network. Its clean null-space error falls twentyfold over training. Its attacked
+null-space error rises over the first epochs to a peak at epoch $3$ and then falls, with large
+fluctuations, to less than half of that peak. The residual network, attacked in the same way,
+follows the same course, with its peak at epoch $8$. For both networks the ratio of attacked to clean
+null-space error grows more than tenfold over training. Both learned corrections thus become more
+robust in absolute terms as they learn and less so relative to their clean error, and at the end of
+training their attacked null-space errors are close to each other, as in the attack suite of
+Section~\ref{sec:results-general}.\\
 The epoch studies at the other three noise levels show the same two patterns. Since the budget is
 fixed at $\varepsilon=0.01$ there, only the shapes of the curves can be compared, not their heights
-(Section~\ref{sec:epoch}). The adversarial error of the residual network peaks early, at epoch $6$, $3$
-and $1$ for $\sigma_\text{rel}=0.005$, $0.02$ and $0.05$, and then falls, to $0.77$, $0.36$ and $0.24$ at
-epoch $50$, while its ratio to the clean error grows to about $66$, $12$ and $4$. That of the Nullspace
-Network stays within $10\%$ of $1.2$, $1.5$ and $2.3$ throughout. Neither network overfits at any noise
-level: the lowest validation loss is reached at epoch $46$ or later in all eight trainings, and in the
-ten trainings of the further runs of Sections~\ref{sec:results-tau} and~\ref{sec:results-data} as well.
+(Section~\ref{sec:epoch}). The adversarial error of the residual network peaks within the first six
+epochs and then falls, while its ratio to the clean error grows; that of the Nullspace Network stays
+flat throughout. Neither network overfits at any noise level: the lowest validation loss is reached
+at epoch $46$ or later in all eight trainings, and in the ten trainings of the further runs of
+Sections~\ref{sec:results-tau} and~\ref{sec:results-data} as well.
 \begin{figure}[htbp]
     \centering
     \begin{subfigure}{\textwidth}
@@ -1974,71 +1963,86 @@ Nullspace Network & 1.28 & 9.66 & $7.9\cdot10^{-8}$ & $1.6\cdot10^{-7}$ & 3.37 &
 \end{tabular}
 \end{table}
 Two entries are known in advance and serve as checks, and both hold. The complement-restricted gain
-of the Nullspace Network is zero up to rounding, $7.9\cdot10^{-8}$, since its correction has no
+of the Nullspace Network is zero up to rounding, since its correction has no
 component in ${\mathcal{N}(\mathbf{A})}^\perp$. And since its output always lies in
 $\mathcal{N}(\mathbf{A})$, its unrestricted gain can exceed its null-restricted gain only through input
 perturbations in ${\mathcal{N}(\mathbf{A})}^\perp$, which is what its cross gain measures. The
-unrestricted gain, $3.37$, does exceed the null-restricted one, $1.28$, and the cross gain, $3.14$,
-accounts for almost all of it. The correction of the Nullspace Network thus responds more than twice
-as strongly to input perturbations in ${\mathcal{N}(\mathbf{A})}^\perp$ as to those in
-$\mathcal{N}(\mathbf{A})$.\\
-The null-restricted gain is lower for the Nullspace Network on average, $1.28$ against $2.09$ for the residual U-Net.
-The two maxima are equal, $9.66$ against $9.68$. The other three noise levels give the same picture,
-with means between $1.06$ and $1.40$ for the Nullspace Network and between $1.92$ and $2.18$ for the
-residual network. Taken on its own, this would suggest that the Nullspace Network is the more stable
-of the two in the null space, which the null-space attack of Section~\ref{sec:results-general} does
-not bear out. There is no contradiction, for the reason given at the end of Section~\ref{sec:lipschitz}:
-a perturbation of the measurement changes the network input by
+unrestricted gain does exceed the null-restricted one, and the cross gain accounts for almost all of
+it. The correction of the Nullspace Network thus responds more than twice as strongly to input
+perturbations in ${\mathcal{N}(\mathbf{A})}^\perp$ as to those in $\mathcal{N}(\mathbf{A})$.\\
+The null-restricted gain of the Nullspace Network is about $40\%$ lower than that of the residual
+network on average, while the two maxima are equal. Taken on its own, this would suggest that the
+Nullspace Network is the more stable of the two in the null space, which the null-space attack of
+Section~\ref{sec:results-general} does not bear out. There is no contradiction, for the reason given
+at the end of Section~\ref{sec:lipschitz}: a perturbation of the measurement changes the network input by
 $\mathbf{A}^{+}\boldsymbol{\delta}\in{\mathcal{N}(\mathbf{A})}^\perp$, never by a vector in
 $\mathcal{N}(\mathbf{A})$, so the null-restricted gain describes the response to perturbations no
 attacker can make.\\
 The cross gain, which an attack on the null-space component exploits, is larger than the
-null-restricted gain for both networks, by a factor of $2.5$ for the Nullspace Network and $1.6$ for
-the residual network, and on it the two networks are close, $3.14$ against $3.34$ on average, with
-maxima of $25.6$ and $17.0$. This matches the null-space attack, which drives the null-space errors of
-both networks to nearly the same level. Across the nine runs of this work, the cross gain orders the
-two networks as the attack does wherever the attack finds a large difference between them. At
-$\tau=4.4\cdot10^{-4}$ the Nullspace Network has the lower cross gain, $4.66$ against $6.37$, and its
-null-space error grows $35\%$ less (Section~\ref{sec:results-tau}); on the multi-ellipse phantoms it
-has the higher one, $13.6$ against $10.9$ at $\tau=4\cdot10^{-3}$ and $16.6$ against $13.6$ at
-$\tau=2.5\cdot10^{-2}$, and its null-space error grows $18\%$ and $15\%$ more
-(Section~\ref{sec:results-data}). The smaller differences it does not order reliably. At every noise
-level of the main experiment the Nullspace Network has the lower cross gain, $2.54$, $3.14$, $3.86$ and
-$5.04$ against $2.73$, $3.34$, $4.14$ and $7.08$, yet at $\sigma_\text{rel}=0.05$ its null-space error
-grows $10\%$ more under attack; at $\tau=6.2\cdot10^{-2}$ the same happens, with $4.18$ against $4.87$
-and $6\%$ more. The gain is that of the linearisation at the clean input, whereas the attack moves the
-input far from it: under the null-space attack the median relative error of the initial reconstruction
-doubles, from $0.40$ to $0.81$ for the residual network and to $0.79$ for the Nullspace Network.\\
-On the multi-ellipse phantoms the order of the null-restricted gains is reversed as well, $3.64$ for
-the Nullspace Network against $3.18$ for the residual network at $\tau=4\cdot10^{-3}$, and $8.85$
-against $7.22$ at $\tau=2.5\cdot10^{-2}$.
+null-restricted gain for both networks, and on it the two networks are close. This matches the
+null-space attack, which drives the null-space errors of both networks to nearly the same level.
+Table~\ref{tab:gains} sets the mean gains of all nine runs of this work next to the outcome of the
+null-space attack. The null-restricted gain is lower for the Nullspace Network in every run on single
+ellipses and higher only on the multi-ellipse phantoms. The cross gain orders the two networks as the
+attack does wherever the attack finds a large difference between them: at $\tau=4.4\cdot10^{-4}$, where
+the null-space error of the Nullspace Network grows a third less, its cross gain is clearly the lower
+one, and on the multi-ellipse phantoms, where it grows more, clearly the higher one. The smaller
+differences it does not order reliably: at $\sigma_\text{rel}=0.05$ and at $\tau=6.2\cdot10^{-2}$ the
+Nullspace Network has the lower cross gain, yet its null-space error grows more. The gain is that of
+the linearisation at the clean input, whereas the attack moves the input far from it: under the
+null-space attack the median relative error of the initial reconstruction doubles.
+\begin{table}[htbp]
+\centering
+\caption{Mean null-restricted and cross gain of the learned correction over $32$ clean initial
+reconstructions, in all nine runs. Last column: how much more ($+$) or less ($-$) the null-space
+error of the Nullspace Network grows under the null-space attack than that of the residual network,
+relative to the mean growth of the latter (Table~\ref{tab:robustness}).}\label{tab:gains}
+\small\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l l l rr rr r}
+\toprule
+ & & & \multicolumn{2}{c}{Residual U-Net} & \multicolumn{2}{c}{Nullspace Network} & \\
+\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+phantoms & $\tau$ & $\sigma_\text{rel}$ & null & cross & null & cross & growth \\
+\midrule
+single & $4\cdot10^{-3}$   & $0.005$ & 2.11 & 2.73 & 1.37 & 2.54 & $-6\%$ \\
+       &                   & $0.01$  & 2.09 & 3.34 & 1.28 & 3.14 & $-7\%$ \\
+       &                   & $0.02$  & 2.18 & 4.14 & 1.40 & 3.86 & $-1\%$ \\
+       &                   & $0.05$  & 1.92 & 7.08 & 1.06 & 5.04 & $+10\%$ \\
+\midrule
+single & $4.4\cdot10^{-4}$ & $0.01$  & 1.23 & 6.37 & 0.33 & 4.66 & $-35\%$ \\
+       & $1.1\cdot10^{-2}$ & $0.01$  & 2.59 & 3.01 & 1.98 & 3.10 & $-11\%$ \\
+       & $6.2\cdot10^{-2}$ & $0.01$  & 5.21 & 4.87 & 3.48 & 4.18 & $+6\%$ \\
+\midrule
+multi  & $4\cdot10^{-3}$   & $0.01$  & 3.18 & 10.93 & 3.64 & 13.61 & $+18\%$ \\
+multi  & $2.5\cdot10^{-2}$ & $0.01$  & 7.22 & 13.62 & 8.85 & 16.63 & $+15\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{The choice of the truncation}\label{sec:results-tau}
 Figure~\ref{fig:tau} shows the truncation study of Section~\ref{sec:pinv}. At the reference threshold
-$\tau=4\cdot10^{-3}$ its curves reproduce the pseudoinverse errors of Table~\ref{tab:clean}: a
-null-space part of about $0.27$ and a total error of about $0.41$ at $\sigma_\text{rel}=0.01$ and about
-$1.5$ at $\sigma_\text{rel}=0.05$. The study evaluates phantoms from the training set with the
+$\tau=4\cdot10^{-3}$ its curves reproduce the pseudoinverse errors of Table~\ref{tab:clean} to within a
+few percent. The study evaluates phantoms from the training set with the
 closed-form expression of Section~\ref{sec:pinv}, whereas the table was measured on the test set with
 the operators of the pipeline, so this agreement is also a check of the study itself.\\
-The pseudoinverse error is smallest at $\tau=6.1\cdot10^{-3}$, $1.1\cdot10^{-2}$,
-$1.8\cdot10^{-2}$ and $8.7\cdot10^{-2}$ for the four noise levels, with minimal mean relative errors of
-$0.290$, $0.320$, $0.367$ and $0.480$.
+The threshold at which the pseudoinverse error is smallest grows with the noise, from
+$\tau=6.1\cdot10^{-3}$ at $\sigma_\text{rel}=0.005$ to $\tau=8.7\cdot10^{-2}$ at $\sigma_\text{rel}=0.05$,
+and lies at $\tau=1.1\cdot10^{-2}$ for $\sigma_\text{rel}=0.01$.
 The reference threshold is thus below the optimum of the pseudoinverse at every noise level, and
 increasingly so as the noise grows: it keeps more directions than the pseudoinverse can use, and at
-$\sigma_\text{rel}=0.05$ it triples the pseudoinverse error, from about $0.48$ to about $1.5$. The
+$\sigma_\text{rel}=0.05$ it triples the pseudoinverse error. The
 Nullspace Network inherits this range error unchanged, so its total errors in Table~\ref{tab:clean}
 are larger than they would be at a pseudoinverse-optimal threshold. The residual network, which
 removes more than $90\%$ of the range component, can be expected to be much less affected. The
 threshold that is optimal for the pseudoinverse need not be optimal for a network that corrects it,
 since a larger threshold also enlarges the null space the network has to fill.
 %PersonalTODO: Add reference to optimal tau study "big in japan"
-At $\sigma_\text{rel}=0.01$ the optimal threshold $\tau=1.1\cdot10^{-2}$ enlarges $\mathcal{N}(\mathbf{A})$ from $5\,234$ to $6\,543$ dimensions, by
-$25\%$.\\
+At $\sigma_\text{rel}=0.01$ the optimal threshold enlarges $\mathcal{N}(\mathbf{A})$ by a quarter.\\
 The per-channel results above are stated on the split at $\tau=4\cdot10^{-3}$, and whether they depend
 on it can only be settled by runs at different thresholds. The study proposes three
 candidates at $\sigma_\text{rel}=0.01$: the pseudoinverse optimum $\tau=1.1\cdot10^{-2}$, and the
 thresholds $\tau=4.4\cdot10^{-4}$ and $\tau=6.2\cdot10^{-2}$, which halve and double the dimension of
-the null space ($2\,615$ and $10\,415$). All three were run at $\sigma_\text{rel}=0.01$, each through the
+the null space. All three were run at $\sigma_\text{rel}=0.01$, each through the
 whole pipeline from data generation to the attacks, since $\tau$ is part of the data.
 Table~\ref{tab:clean-tau} gives their clean errors next to those at the reference threshold.
 \begin{table}[htbp]
@@ -2076,58 +2080,51 @@ $\lVert\mathbf{e}_{\mathcal{N}}\rVert$ & $\lVert\mathbf{e}_{\mathcal{N}^\perp}\r
 \bottomrule
 \end{tabular}
 \end{table}
-The pseudoinverse behaves as the study predicts. As $\tau$ grows, its range error falls, from $2.069$
-to $0.054$, and its null-space error rises, from $0.197$ to $0.406$.
-Its total error is smallest at the optimum $\tau=1.1\cdot10^{-2}$, $0.336$. At
-$\tau=4.4\cdot10^{-4}$ it amplifies by up to $1/\tau\approx2\,300$, and with a relative error of $2.08$
-its reconstruction is dominated by amplified noise.\\
+The pseudoinverse behaves as the study predicts. As $\tau$ grows, its range error falls by a factor of
+almost forty and its null-space error doubles; its total error is smallest at the optimum
+$\tau=1.1\cdot10^{-2}$. At $\tau=4.4\cdot10^{-4}$ it amplifies by up to $1/\tau\approx2\,300$, and its
+reconstruction is dominated by amplified noise, with an error twice the norm of the phantom.\\
 The Nullspace Network inherits the range floor exactly at every threshold, so its total error follows
-the range error of the pseudoinverse, not its total error: it falls with every step in $\tau$, from
-$2.069$ to $0.289$, $0.122$ and $0.057$. Of the four thresholds its best is the largest, well above the
-optimum of the pseudoinverse. At $\tau=6.2\cdot10^{-2}$ the pseudoinverse is worse than at
-$\tau=1.1\cdot10^{-2}$, $0.411$ against $0.336$, but the Nullspace Network is better by more than half,
-$0.057$ against $0.122$, because the larger threshold moves error from the range component, which the
-Nullspace Network inherits, into the null space, which it has learned to fill. The residual network is
-best at the optimum of the pseudoinverse, with $0.0176$ against $0.0235$ and $0.0221$ at the neighbouring
-thresholds. At $\tau=4.4\cdot10^{-4}$ its error rises to $0.083$ and its SSIM falls to $0.88$, since it
-has to remove a range error of $2.07$ from its input. The gap between the two architectures narrows as
-$\tau$ grows, from a factor of $12$ at the reference threshold to $2.6$ at $\tau=6.2\cdot10^{-2}$. On the
-null-space component the order of Table~\ref{tab:clean} persists at every threshold: the clean
-null-space error of the Nullspace Network is $0.0147$, $0.0092$, $0.0111$ and $0.0146$, against $0.0464$,
-$0.0160$, $0.0122$ and $0.0179$ for the residual network.\\
+the range error of the pseudoinverse, not its total error: it falls with every step in $\tau$. Of the
+four thresholds its best is the largest, well above the optimum of the pseudoinverse. At
+$\tau=6.2\cdot10^{-2}$ the pseudoinverse is worse than at its optimum, but the Nullspace Network
+more than halves its error once more, because the larger threshold moves error from the range
+component, which the Nullspace Network inherits, into the null space, which it has learned to fill.
+The residual network is best at the optimum of the pseudoinverse. At $\tau=4.4\cdot10^{-4}$ its
+reconstruction degrades markedly, since it has to remove a range error twice the norm of the phantom
+from its input. The gap between the two architectures narrows as $\tau$ grows, from a factor of $12$
+at the reference threshold to $2.6$ at $\tau=6.2\cdot10^{-2}$. On the null-space component the order of
+Table~\ref{tab:clean} persists at every threshold: the Nullspace Network has the lower clean
+null-space error.\\
 Under attack, the threshold sets the amplification of the pseudoinverse. The bound
 $\varepsilon(1+\sigma_\text{rel})/\tau$ of Section~\ref{sec:results-general} on the growth of the range
-component is $23$, $2.5$, $0.92$ and $0.16$ at the four thresholds, and at the three smaller ones the
-median growth under the untargeted attack follows it, with $8.78$, $0.96$ and $0.33$, between $36\%$ and
-$38\%$ of the bound each time (Table~\ref{tab:prop}). The range damage the untargeted attack does to the
-Nullspace Network thus scales with $1/\tau$. At $\tau=6.2\cdot10^{-2}$ the median growth is only
-$0.046$, $28\%$ of a bound that has itself become short, and the untargeted attack turns elsewhere:
-$92\%$ of the attacked error of the Nullspace Network lies in the null space, against $2\%$ at the
-reference threshold. As on the multi-ellipse phantoms at $\tau=2.5\cdot10^{-2}$
+component scales with $1/\tau$, and at the three smaller thresholds the median growth under the
+untargeted attack follows it, at $36$ to $38\%$ of the bound each time (Table~\ref{tab:prop}). The range
+damage the untargeted attack does to the Nullspace Network thus scales with $1/\tau$. At
+$\tau=6.2\cdot10^{-2}$ it falls short of this, to $28\%$ of a bound that has itself become small, and
+the untargeted attack turns elsewhere: most of the attacked error of the Nullspace Network now lies in
+the null space. As on the multi-ellipse phantoms at $\tau=2.5\cdot10^{-2}$
 (Section~\ref{sec:results-data}), the untargeted attack on the Nullspace Network becomes a null-space
-attack by itself once tau is large enough. This is also the only run of this work in which the
-untargeted attack leaves the Nullspace Network with the smaller total error, a median of $0.22$ against
-$0.26$ for the residual network; under the null-space attack the two are level, at $0.27$ and $0.26$.\\
-The comparison on the null space does depend on the threshold (Table~\ref{tab:robustness}). The paired
-differences of the growths are $+0.689\pm0.055$, $+0.032\pm0.018$, $+0.039\pm0.014$ and
-$-0.016\pm0.013$ at the four thresholds in increasing order. Relative to the mean growth of the
-residual network, the null-space error of the Nullspace Network grows $35\%$, $7\%$ and $11\%$ less at
-the three smaller thresholds and $6\%$ more at the largest, where it grows more on $58\%$ of the
-samples and the difference lies just outside sampling error. The advantage of the Nullspace Network
-thus shrinks as the null space grows and changes sign at twice the reference dimension; at the two
-middle thresholds the differences cannot be told apart.\\
-Only at the smallest threshold is the difference large. There the attacked null-space medians are
-$1.28$ for the Nullspace Network against $2.02$ for the residual network, and the null-space error of
-the Nullspace Network grows less on $95\%$ of the samples. This advantage appears at a threshold at
-which the Nullspace Network fails without any attack: its clean error is $2.07$, twice the norm of the
-phantom. The null-space attack moves both networks far from their clean input, raising the median error
-of the initial reconstruction from $1.99$ to $6.4$ and $6.7$. It drives the null-space errors of both
+attack by itself once $\tau$ is large enough. This is also the only run of this work in which the
+untargeted attack leaves the Nullspace Network with the smaller total error; under the null-space
+attack the two are level.\\
+The comparison on the null space does depend on the threshold (Tables~\ref{tab:robustness}
+and~\ref{tab:gains}). Relative to the growth of the residual network, the null-space error of the
+Nullspace Network grows a third less at the smallest threshold, about a tenth less at the two middle
+ones, and $6\%$ more at the largest, where the difference lies just outside sampling error. The
+advantage of the Nullspace Network thus shrinks as the null space grows and changes sign at twice
+the reference dimension; at the two middle thresholds the differences cannot be told apart.\\
+Only at the smallest threshold is the difference large. There the null-space error of the Nullspace
+Network grows less on $95\%$ of the samples. This advantage appears at a threshold at
+which the Nullspace Network fails without any attack: its clean error is twice the norm of the
+phantom. The null-space attack moves both networks far from their clean input, more than tripling
+the error of the initial reconstruction. It drives the null-space errors of both
 networks beyond the norm of the phantom itself, while the range error of the Nullspace Network, which
-the attacker cannot help growing, reaches $6.70$.\\
+the attacker cannot help growing, reaches almost seven times that norm.\\
 Over the thresholds from $\tau=4\cdot10^{-3}$ to $\tau=6.2\cdot10^{-2}$, which include the pseudoinverse
 optimum and double the null space, the comparison keeps the character it has at the reference
-threshold: the null-space attack raises the median null-space errors of both networks by a factor
-between $20$ and $57$, and the attacked medians of the two differ by less than $10\%$. Within this range
+threshold: the null-space attack raises the median null-space errors of both networks by a factor of
+$20$ or more, and the attacked medians of the two differ by less than $10\%$. Within this range
 the negative result does not hang on the choice $\tau=4\cdot10^{-3}$. The one clear advantage of the
 Nullspace Network in the null space appears only at a threshold at which it fails without any attack.
 \begin{figure}[htbp]
@@ -2172,24 +2169,22 @@ $\lVert\mathbf{e}_{\mathcal{N}}\rVert$ & $\lVert\mathbf{e}_{\mathcal{N}^\perp}\r
 \end{tabular}
 \end{table}
 Table~\ref{tab:clean-ellipses} gives the clean errors. The learning problem is much harder: the total
-error of the residual network is $0.125$, five times its value on single ellipses, and its SSIM $0.87$.
+error of the residual network is five times its value on single ellipses.
 The range floor of the Nullspace Network is exact again,
-and the Nullspace Network still has the lower clean null-space error, though by less than before:
-$0.093$ against $0.102$ at $\tau=4\cdot10^{-3}$, $0.100$ against $0.106$ at $\tau=2.5\cdot10^{-2}$.\\
+and the Nullspace Network still has the lower clean null-space error, though by less than before.\\
 The lower clean null-space error carries over in its weak form, and on these phantoms the comparison tips the
 other way. The null-space attack again drives the null-space errors of both networks to a similar level,
-but now that of the Nullspace Network is the larger one, $1.09$ against $0.96$ at $\tau=4\cdot10^{-3}$
-and $0.94$ against $0.83$ at $\tau=2.5\cdot10^{-2}$ (Table~\ref{tab:robustness}). Its null-space error
-grows more on $99\%$ and $98\%$ of the samples, and the paired differences, $-0.150\pm0.012$ and
-$-0.105\pm0.010$, lie far outside sampling error; they amount to $18\%$ and $15\%$ of the mean growth of the residual network.
+but now that of the Nullspace Network is the larger one, at both thresholds (Table~\ref{tab:robustness}).
+Its null-space error grows more on practically every sample, the paired differences lie far outside
+sampling error, and it grows by $15$ to $18\%$ more than that of the residual network
+(Table~\ref{tab:gains}).
 On these phantoms data consistency does not merely fail to make the learned correction more robust:
 the correction of the Nullspace Network is the more vulnerable of the two.\\
-Another observation is that at $\tau=2.5\cdot10^{-2}$ the amplification bound for the pseudoinverse shrinks to $0.40$,
-and the untargeted attack on the Nullspace Network no longer finds the range component the cheapest target:
-$97\%$ of its attacked error lies in the null space,
-against $8\%$ at $\tau=4\cdot10^{-3}$ (Table~\ref{tab:prop}). With a truncation this coarse, the untargeted
-attack on the Nullspace Network becomes a null-space attack by itself, as it does on single ellipses at
-$\tau=6.2\cdot10^{-2}$ (Section~\ref{sec:results-tau}).
+Another observation is that at $\tau=2.5\cdot10^{-2}$ the amplification bound for the pseudoinverse
+becomes small, and the untargeted attack on the Nullspace Network no longer finds the range component
+the cheapest target: almost all of its attacked error lies in the null space (Table~\ref{tab:prop}).
+With a truncation this coarse, the untargeted attack on the Nullspace Network becomes a null-space
+attack by itself, as it does on single ellipses at $\tau=6.2\cdot10^{-2}$ (Section~\ref{sec:results-tau}).
 
 \subsection{What the evidence supports}\label{sec:results-claim}
 %TODO: Adapt studies:
