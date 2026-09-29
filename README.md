@@ -16,7 +16,9 @@ operator. `thesis.tex` is the write-up; this file is how to run it.
 | `train.py` | trains both architectures on one noise level |
 | `src/attack.py` (entry: `attack.py`) | PGD attack suite, epoch study, metrics, Lipschitz estimate |
 | `src/visualisations.py` (entry: `visualise.py`) | every figure, rebuilt from saved artifacts only |
-| `slurm_full_run.sh` | the full experiment for one noise level as one Slurm job |
+| `slurm_full_run.sh` | the whole single-ellipse experiment as one Slurm job: every noise level at four truncations |
+| `slurm_ellipses.sh` | the multi-ellipse phantoms at one noise level, as a job of its own |
+| `run_pipeline.sh` | the stages of one run, shared by both jobs (sourced, not submitted) |
 | `src/truncation.py` | the truncation study of a run: the τ per noise level at which the pseudoinverse is best, how much the channel split depends on τ, candidates for a second truncation |
 | `tests/test_nsn.py` | the test suite |
 
@@ -24,26 +26,41 @@ operator. `thesis.tex` is the write-up; this file is how to run it.
 
 Everything runs from the repository root, in the `data_prox2` environment.
 
-The whole experiment for one noise level, as one Slurm job (tests, truncation
-study, data, training, attack suite, epoch study, figures; a failing stage
-aborts):
+The whole experiment is two Slurm jobs, which can run at the same time:
 
 ```bash
-sbatch --export=ALL,NOISE=0.01 slurm_full_run.sh
-sbatch --export=ALL,NOISE=0.01,CREATE_DATA=0,TRAIN=0 slurm_full_run.sh   # reuse data and models
-sbatch --export=ALL,NOISE=0.01,SVD_THRESH=auto slurm_full_run.sh         # at the pseudoinverse's best τ
-sbatch --export=ALL,NOISE=0.01,SVD_THRESH=1e-3 slurm_full_run.sh         # at another truncation
-sbatch --export=ALL,NOISE=0.01,PHANTOM=ellipses slurm_full_run.sh        # on multi-ellipse phantoms
+sbatch slurm_full_run.sh     # single ellipses: 4 noise levels x 4 truncations, 16 runs
+sbatch slurm_ellipses.sh     # multi-ellipse phantoms at noise 0.01: 2 runs
 ```
 
-The truncation study writes `<run>/truncation/`: per noise level the τ at which
-the pseudoinverse error is smallest, and candidates for a second truncation.
-`SVD_THRESH=auto` runs the job at that optimum. A second truncation or phantom
-family writes to its own data, model and output directories (`..._tau1e-3`,
-`..._ellipses`), so it never overwrites the main experiment. τ and the phantoms
-are baked into the data, so `CREATE_DATA=0` cannot be combined with new ones.
-The first job decomposes the operator and caches it; start the other jobs once
-its log has reached the data generation stage.
+At every noise level `slurm_full_run.sh` runs the reference τ = 4·10⁻³, the τ at
+which the truncation study finds the pseudoinverse best (listed in the script
+and checked against the study by every run), and τ = 4.4·10⁻⁴ and 6.2·10⁻²,
+which halve and double dim N(A). Each run goes through the tests' environment,
+the truncation study, data, training, the attack suite with the Lipschitz
+estimate, the epoch study (total and null-space error) and the figures; a
+failing stage aborts the job.
+
+A run reuses the data when its `summary.json` exists and the models when every
+model has its `_history.json` (both are written last), after checking that the
+data were made for this noise level, τ and phantom family. Everything after the
+training is always recomputed, so every number of a run comes from one version
+of the code, and a finished run leaves `<run>/.complete` with the commit. A job
+that stopped is simply resubmitted: runs finished at the current commit are
+skipped. Runs whose models exist go first, so a problem in the later stages
+shows up before a day of training.
+
+```bash
+sbatch --export=ALL,NOISES=0.02 slurm_full_run.sh      # one noise level only
+sbatch --export=ALL,FORCE_RUN=1 slurm_full_run.sh      # redo finished runs
+sbatch --export=ALL,FORCE_TRAIN=1 slurm_full_run.sh    # retrain on the existing data
+```
+
+A truncation or phantom family other than the reference writes to its own data,
+model and output directories (`..._tau0.011`, `..._ellipses`), so no run
+overwrites another. The operator is decomposed once per geometry and τ and
+cached in `radon_cache/`; a job that needs an entry another job is still
+building waits for it.
 
 The stages by hand, for one noise level:
 
@@ -53,6 +70,7 @@ python -m src.create_phantom_data --noise 0.01 --out_dir data
 python train.py --data_dir data/0.01 --out_dir models/0.01 --checkpoint-every 1
 python attack.py --data-root data/0.01 --model-dir models/0.01 --lipschitz
 python attack.py --data-root data/0.01 --model-dir models/0.01 --epoch-study --max-samples 32
+python attack.py --data-root data/0.01 --model-dir models/0.01 --epoch-study --epoch-objective null --max-samples 32
 python visualise.py attacks_n0.01
 ```
 
@@ -62,7 +80,8 @@ from `src`.
 ## Conventions worth knowing
 
 - **One operator, one truncation.** Noise, reconstruction, attack and the
-  data-consistency residual all use the operator truncated at τ = 4·10⁻³.
+  data-consistency residual all use the operator truncated at the run's τ
+  (4·10⁻³ for the reference runs).
   Drawing the noise from a second, untruncated operator delivered only 82 % of
   the nominal noise to the reconstruction while the attack budget was fully
   effective; the truncation study reports this number with every run.
@@ -89,11 +108,21 @@ from `src`.
   The test set is never used for training or for model selection.
 - **Seeds are fixed** for data generation, training and the attacks. The
   phantoms come from DIVAL's fixed seeds (without them DIVAL draws a new seed
-  every run), the noise from `set_seed(0)`. Training is reproducible closely
-  rather than bit for bit, because cuDNN's convolution kernels are not
-  deterministic.
-- **Attack budget** is ε·‖y‖ per sample with ε = σ_rel by default, the step size
-  2.5·ε_i/50, and of two random restarts the better one is kept per sample.
+  every run), the noise from `set_seed(0)`. Every attack, every Lipschitz
+  restriction and every epoch-study snapshot reseeds from its own name
+  (`stage_seed`), so a stage's numbers do not depend on which stages ran before
+  it, both models start from the same random points, and along an epoch-study
+  curve only the weights change. Training is reproducible closely rather than
+  bit for bit, because cuDNN's convolution kernels are not deterministic.
+- **Attack budget** is ε·‖y‖ per sample with ε = σ_rel by default, for the
+  attack suite and the epoch study alike (`--suite-eps` / `--epoch-eps` override
+  it), the step size 2.5·ε_i/50, and of two random restarts the better one is
+  kept per sample.
+- **Targeted attacks are scored by the distance to their target** t, relative to
+  ‖x_gt − t‖: 1 at the ground truth, 0 at the target (`tgt_*` columns), split
+  into range and null-space part, plus the share of samples that end closer to
+  the target than to the ground truth. The attack towards another sample draws
+  its targets once, so both models are attacked towards the same ones.
 
 Changing the truncation, the phantoms, the precision or the splits changes the
 data or the models, so data generation and training have to be rerun.

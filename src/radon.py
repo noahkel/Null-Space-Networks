@@ -14,7 +14,10 @@ zeroed, so every sinogram in a run has the same shape.
 """
 import hashlib
 import math
+import os
+import shutil
 import warnings
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -22,6 +25,27 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse
 import torch
+
+
+@contextmanager
+def _cache_lock(entry: Path):
+    """Hold an exclusive lock on one cache entry across processes.
+
+    Two jobs that need the same entry would otherwise both decompose the
+    operator and write the entry at once; with the lock the second waits and
+    loads what the first saved. POSIX only (the cluster); elsewhere a no-op."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    with open(entry.with_name(entry.name + ".lock"), "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
@@ -141,24 +165,25 @@ class MatrixRadonAdapter:
 
         cache_path = Path(cache_dir) / self._cache_key() if cache_dir is not None else None
         print(f"Cache path: {cache_path}")
-        if cache_path is not None and cache_path.exists():
-            print(f"Loading matrix cache from {cache_path}")
-            self._load_cache(cache_path)
-            if hasattr(self, "_U_k_la"):
-                self._check_factors(f"cache {cache_path}",
-                                    hint=f" Delete {cache_path} to have it rebuilt.")
-        else:
-            try:
-                import astra as _astra
-            except ImportError:
-                raise ImportError(
-                    "astra-toolbox is required. Install with:\n"
-                    "  conda install -c astra-toolbox astra-toolbox"
-                )
-            self._build_matrices(_astra)
-            if cache_path is not None:
-                print(f"Saving matrix cache to {cache_path}")
-                self._save_cache(cache_path)
+        with _cache_lock(cache_path) if cache_path is not None else nullcontext():
+            if cache_path is not None and cache_path.exists():
+                print(f"Loading matrix cache from {cache_path}")
+                self._load_cache(cache_path)
+                if hasattr(self, "_U_k_la"):
+                    self._check_factors(f"cache {cache_path}",
+                                        hint=f" Delete {cache_path} to have it rebuilt.")
+            else:
+                try:
+                    import astra as _astra
+                except ImportError:
+                    raise ImportError(
+                        "astra-toolbox is required. Install with:\n"
+                        "  conda install -c astra-toolbox astra-toolbox"
+                    )
+                self._build_matrices(_astra)
+                if cache_path is not None:
+                    print(f"Saving matrix cache to {cache_path}")
+                    self._save_cache(cache_path)
 
         if estimate_norm:
             self._estimate_operator_norm(iters=norm_iters)
@@ -386,7 +411,11 @@ class MatrixRadonAdapter:
         return h.hexdigest()[:16]
 
     def _save_cache(self, path: Path) -> None:
-        path.mkdir(parents=True, exist_ok=True)
+        # Written into a scratch directory and renamed into place once complete,
+        # so a job killed mid-write leaves no entry behind that looks finished.
+        final, path = path, path.with_name(f"{path.name}.tmp{os.getpid()}")
+        shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(parents=True)
 
         # Saved in the adapter's own dtype; the cache key includes it.
         for name, mat in [("A", self._A), ("A_la", self._A_la)]:
@@ -407,6 +436,12 @@ class MatrixRadonAdapter:
         ]:
             if tensor is not None:
                 np.save(str(path / f"{name}.npy"), tensor.cpu().numpy())
+
+        if final.exists():
+            # Another process finished the same entry first; keep that one.
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            os.replace(path, final)
 
     def _load_cache(self, path: Path) -> None:
         self._A    = self._csr_to_torch(scipy.sparse.load_npz(str(path / "A.npz")))

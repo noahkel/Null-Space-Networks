@@ -24,6 +24,7 @@ import csv
 import json
 import math
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -62,8 +63,6 @@ SUITE_EXAMPLES = 10
 SUITE_TRANSFER_SAMPLES = 5
 SUITE_RESTARTS = 2
 
-EPOCH_EPS = 0.01
-
 NUM_WORKERS = 4
 BATCH_SIZE = 32
 
@@ -81,6 +80,18 @@ INIT_NAME = "pinv"
 
 
 SUCCESS_MSE_FACTOR = 2.0
+
+
+def stage_seed(*parts: str) -> int:
+    """The seed of one stage of a run, e.g. stage_seed("suite", attack_name).
+
+    Every stage reseeds before it draws, so its random starts do not depend on
+    which stages ran before it: adding an attack to the suite leaves the numbers
+    of the others unchanged. Derived with crc32 because Python's hash() of a
+    string changes from one interpreter to the next."""
+    return (SEED + zlib.crc32("/".join(parts).encode("utf-8"))) % 2 ** 31
+
+
 # --------------------------------------------------------------------------- #
 # Small tensor helpers.
 # --------------------------------------------------------------------------- #
@@ -381,6 +392,57 @@ def load_model_checkpoint(
 # --------------------------------------------------------------------------- #
 # Per-sample metrics.
 # --------------------------------------------------------------------------- #
+def target_distance_metrics(
+    x_gt: torch.Tensor,
+    target: torch.Tensor,
+    clean_pred: torch.Tensor,
+    adv_pred: torch.Tensor,
+    clean_init: torch.Tensor,
+    adv_init: torch.Tensor,
+    radon=None,
+) -> Dict[str, float]:
+    """How close a targeted attack brought one sample to its target t.
+
+    Every distance is taken relative to ||x_gt - t||, the distance the attack
+    has to cover:
+
+        tgt_dist(x) = ||x - t|| / ||x_gt - t||,
+
+    1 at the ground truth and 0 at the target, so the attack towards the zero
+    image and the attack towards another sample read on one scale. The
+    denominator has the floor of rel_l2_np. tgt_closed is the fraction of the
+    clean reconstruction's distance the attack closed, and tgt_success whether
+    the attacked reconstruction ends closer to the target than to the ground
+    truth. With a radon operator the distance is also split into its range and
+    null-space component: for the NSN the range component moves only through
+    A^+ delta, whatever the network does. Arguments are single samples
+    (1, 1, H, W)."""
+    gt_np = to_numpy_img(x_gt)
+    t_np = to_numpy_img(target)
+    span = max(float(np.linalg.norm((gt_np - t_np).ravel())), 1e-3 * math.sqrt(gt_np.size))
+
+    def dist(x: torch.Tensor) -> float:
+        return float(np.linalg.norm((to_numpy_img(x) - t_np).ravel())) / span
+
+    adv_np = to_numpy_img(adv_pred)
+    row = {
+        "tgt_span": span,
+        "tgt_dist_clean": dist(clean_pred),
+        "tgt_dist_adv": dist(adv_pred),
+        "tgt_dist_init_clean": dist(clean_init),
+        "tgt_dist_init_adv": dist(adv_init),
+        "tgt_success": float(np.linalg.norm((adv_np - t_np).ravel())
+                             < np.linalg.norm((adv_np - gt_np).ravel())),
+    }
+    row["tgt_closed"] = 1.0 - row["tgt_dist_adv"] / max(row["tgt_dist_clean"], 1e-12)
+    if radon is not None:
+        for cond, pred in (("clean", clean_pred), ("adv", adv_pred)):
+            d_ran, d_nul = decompose_error(pred - target, radon)
+            row[f"tgt_dist_{cond}_ran"] = float(torch.linalg.norm(d_ran.reshape(-1))) / span
+            row[f"tgt_dist_{cond}_nul"] = float(torch.linalg.norm(d_nul.reshape(-1))) / span
+    return row
+
+
 def evaluate_batch(
     x_gt: torch.Tensor,
     clean_init: torch.Tensor,
@@ -392,10 +454,13 @@ def evaluate_batch(
     delta: torch.Tensor,
     success_mse_factor: float,
     radon=None,
+    target: Optional[torch.Tensor] = None,
 ) -> List[Dict[str, float]]:
     """Per-sample metrics for one batch: clean and adversarial reconstruction
     quality, the size of the perturbation, and the range/null decomposition of
-    both error fields (when a radon operator is supplied)."""
+    both error fields (when a radon operator is supplied). For a targeted attack
+    ``target`` is its target image per sample, and the distance to it is scored
+    as well (target_distance_metrics)."""
     rows: List[Dict[str, float]] = []
     batch_size = x_gt.shape[0]
 
@@ -569,6 +634,12 @@ def evaluate_batch(
                 "adv_init_e_nul_frac": adv_ie_nul_l2 / max(adv_ie_l2, 1e-12),
             })
 
+        if target is not None:
+            s = slice(i, i + 1)
+            row.update(target_distance_metrics(
+                x_gt[s], target[s], clean_pred[s], adv_pred[s],
+                clean_init[s], adv_init[s], radon=radon))
+
         rows.append(row)
 
     return rows
@@ -644,6 +715,12 @@ def summarize_metrics(rows: List[Dict[str, float]]) -> Dict[str, float]:
         for cond in ("clean", "adv")
         for metric in ("rel_l2", "psnr", "ssim", "mae", "nrmse", "rmse", "max_err")
         for sub in ("ran", "nul")
+    ]
+    # Distance to the target, present for the targeted attacks only.
+    decomp_keys += [
+        "tgt_span", "tgt_dist_clean", "tgt_dist_adv", "tgt_dist_init_clean",
+        "tgt_dist_init_adv", "tgt_closed", "tgt_success",
+        "tgt_dist_clean_ran", "tgt_dist_clean_nul", "tgt_dist_adv_ran", "tgt_dist_adv_nul",
     ]
     keys = keys + [k for k in decomp_keys if k in rows[0]]
     for key in keys:
@@ -834,7 +911,8 @@ def make_other_sample_target(x_gt: torch.Tensor, generator: Optional[torch.Gener
     b = x_gt.shape[0]
     if b == 1:
         return x_gt.clone()
-    arange = torch.arange(b, device=x_gt.device)
+    # Drawn on the CPU, so a CPU generator serves a batch on any device.
+    arange = torch.arange(b)
     # Draw a random derangement (a permutation with no fixed point) by rejection
     # sampling so every target is guaranteed to be a *different* sample. A random
     # permutation has no fixed point with probability ~1/e ≈ 0.37, so 20 attempts
@@ -842,14 +920,34 @@ def make_other_sample_target(x_gt: torch.Tensor, generator: Optional[torch.Gener
     # guaranteed derangement for that rare case.
     perm = None
     for _ in range(20):
-        cand = torch.randperm(b, generator=generator, device=x_gt.device)
+        cand = torch.randperm(b, generator=generator)
         if not bool((cand == arange).any()):
             perm = cand
             break
     if perm is None:
-        shift = int(torch.randint(1, b, (1,), generator=generator, device=x_gt.device).item())
+        shift = int(torch.randint(1, b, (1,), generator=generator).item())
         perm = (arange + shift) % b
-    return x_gt[perm]
+    return x_gt[perm.to(x_gt.device)]
+
+
+# Attacks scored by the distance to their target: the image the attack steers
+# the reconstruction towards.
+_SUITE_SCORED_BY_TARGET = {"adversarial_target_zero", "adversarial_target_sample"}
+
+
+def suite_targets(attack_name: str, input_cache: List[Tuple]) -> List[Optional[torch.Tensor]]:
+    """The target image of every batch of the input cache for one attack, None
+    for an untargeted one.
+
+    Drawn once per attack from a generator of its own, so both models are
+    attacked towards the same targets and their results pair up sample by
+    sample."""
+    if attack_name == "adversarial_target_zero":
+        return [torch.zeros_like(entry[0]) for entry in input_cache]
+    if attack_name in _SUITE_TARGETED_ATTACKS:
+        gen = torch.Generator().manual_seed(stage_seed("targets", attack_name))
+        return [make_other_sample_target(entry[0], generator=gen) for entry in input_cache]
+    return [None] * len(input_cache)
 
 def detect_suite_models(model_dir: Optional[str]) -> List[str]:
     """Return the model names whose checkpoints exist under ``model_dir``."""
@@ -921,10 +1019,12 @@ def build_input_cache(projector, loader, max_samples: int, device) -> List[Tuple
     return cache
 
 def build_example_row(radon, x_gt, clean_init, adv_init, clean_pred, adv_pred,
-                      y_clean, adv_y, delta, i: int) -> Dict:
+                      y_clean, adv_y, delta, i: int,
+                      target: Optional[torch.Tensor] = None) -> Dict:
     """Assemble one example-image row (GT, inits, preds, sinos and range/null
     error decompositions) for the saved examples bundle (rendered later by
-    visualise.save_examples)."""
+    visualise.save_examples). For a targeted attack the row also carries the
+    target image and the distances to it."""
     e_ran_clean, e_nul_clean = decompose_error(clean_pred[i:i + 1] - x_gt[i:i + 1], radon)
     e_ran_adv, e_nul_adv = decompose_error(adv_pred[i:i + 1] - x_gt[i:i + 1], radon)
     e_ran_ic, e_nul_ic = decompose_error(clean_init[i:i + 1] - x_gt[i:i + 1], radon)
@@ -973,6 +1073,12 @@ def build_example_row(radon, x_gt, clean_init, adv_init, clean_pred, adv_pred,
     # proj_ran(A_la^+ delta). A_la^+ is linear, so the identity holds exactly.
     e_ran_init_d, _ = decompose_error(radon.backward_la(delta[i:i + 1]), radon)
     row["proj_ran_init_delta"] = e_ran_init_d.squeeze().numpy()
+    if target is not None:
+        s = slice(i, i + 1)
+        row["target"] = to_numpy_img(target[i])
+        d = target_distance_metrics(x_gt[s], target[s], clean_pred[s], adv_pred[s],
+                                    clean_init[s], adv_init[s])
+        row["tgt_dist_clean"], row["tgt_dist_adv"] = d["tgt_dist_clean"], d["tgt_dist_adv"]
     return row
 
 def _stack_chunks(chunks: List[torch.Tensor]) -> np.ndarray:
@@ -1022,10 +1128,14 @@ def run_suite(args, radon, summary: Dict,
 
         summary_by_model: Dict[str, Dict] = {}
         transfer_pert: Dict[str, torch.Tensor] = {}  # first-batch perturbation per source
+        targets = suite_targets(attack_name, input_cache)
 
         for model_name in model_names:
             adapter = adapters[model_name]
             model = models[model_name]
+            # The same seed for every model: both start from the same random
+            # points, so the only difference between their attacks is the model.
+            set_seed(stage_seed("suite", attack_name))
             rows: List[Dict[str, float]] = []
             example_rows: List[Dict] = []
             worst: List[Tuple[float, Dict]] = []
@@ -1039,17 +1149,16 @@ def run_suite(args, radon, summary: Dict,
                 eps_batch = suite_eps_batch(y_clean, eps_nominal)
 
                 # Targeted attacks steer the recon toward a fixed reference:
-                # 'zero' targets the zero image internally (target=None), while
-                # 'target' needs a per-batch reference — a random *other*
-                # sample's ground truth.
-                target = (make_other_sample_target(x_gt)
-                          if attack_name in _SUITE_TARGETED_ATTACKS else None)
+                # 'zero' targets the zero image internally, while 'target' needs
+                # the per-batch reference, a random *other* sample's ground
+                # truth. Both are scored by the distance to their target.
+                target = targets[bi]
                 result = pgd_attack(
                     adapter=adapter, x_gt=x_gt, y_clean=y_clean,
                     clean_pred=clean_pred, eps=eps_batch,
                     alpha=suite_step_size(eps_batch),
                     objective=objective,
-                    target=target)
+                    target=target if attack_name in _SUITE_TARGETED_ATTACKS else None)
                 with torch.no_grad():
                     adv_pred, adv_init, y_adv = adapter.forward(result.y_adv)
                 delta = result.delta
@@ -1064,6 +1173,7 @@ def run_suite(args, radon, summary: Dict,
                     x_gt=x_gt, clean_init=clean_init, clean_y=y_clean, clean_pred=clean_pred,
                     adv_init=adv_init, adv_y=y_adv, adv_pred=adv_pred, delta=delta,
                     success_mse_factor=SUCCESS_MSE_FACTOR, radon=radon,
+                    target=target,
                 ))
 
                 # One example-image dict for sample j, shared by the first-K
@@ -1072,7 +1182,7 @@ def run_suite(args, radon, summary: Dict,
                 def make_example_row(j):
                     return build_example_row(
                         radon, x_gt, clean_init, adv_init, clean_pred, adv_pred,
-                        y_clean, y_adv, delta, j)
+                        y_clean, y_adv, delta, j, target=target)
 
                 slots = SUITE_EXAMPLES - len(example_rows)
                 for j in range(min(x_gt.shape[0], max(slots, 0))):
@@ -1204,6 +1314,8 @@ def write_lipschitz(args, models: Dict[str, nn.Module], input_cache: List[Tuple]
         entry = lip_res.setdefault(name, {})
         for restriction in parse_lipschitz_restrictions(args.lipschitz_restrictions):
             in_proj, out_proj = restriction_projectors(radon, restriction)
+            # Same start vectors for every model, independent of the attacks before.
+            set_seed(stage_seed("lipschitz", restriction))
             r = estimate_lipschitz(
                 model=model, clean_cache=input_cache, radon=radon,
                 n_samples=args.lipschitz_samples, n_iters=args.lipschitz_iters,
@@ -1241,6 +1353,8 @@ _AGGREGATE_METRICS = [
     "adv_e_nul_l2", "adv_e_ran_l2", "adv_e_nul_frac",
     "clean_consistency_rel", "adv_consistency_rel", "adv_consistency_vs_clean_rel",
     "delta_rel_l2", "success_mse",
+    # targeted attacks only; NaN for the others
+    "tgt_dist_clean", "tgt_dist_adv", "tgt_closed", "tgt_success",
 ]
 
 def aggregate_from_disk(attacks_root) -> List[Dict[str, float]]:
@@ -1356,6 +1470,18 @@ def load_epoch_history(model_dir: Optional[str],
 _EPOCH_OBJECTIVES = {"mse", "null", "range", "zero"}
 
 
+def resolve_epoch_eps(epoch_eps: Optional[float], noise_rel: float) -> float:
+    """The budget of the epoch study: ``epoch_eps`` when given, otherwise the
+    training noise level, the budget of the attack suite. With the suite's
+    budget the last snapshot of each curve is attacked as the suite attacks the
+    best checkpoint, at every noise level alike."""
+    eps = epoch_eps if epoch_eps is not None else noise_rel
+    if not eps or eps <= 0:
+        raise ValueError("the epoch study needs noise_sigma_rel in summary.json, "
+                         "or pass --epoch-eps explicitly.")
+    return float(eps)
+
+
 def epoch_study_csv_name(model_name: str, objective: str = "mse") -> str:
     """epoch_study/{init}_{model}.csv for the total-error attack, the name every
     finished run already has; {init}_{model}_{objective}.csv for any other."""
@@ -1378,7 +1504,7 @@ def run_epoch_study(args) -> None:
     device, radon = setup.device, setup.radon
     out_root = setup.out_root
 
-    eps_nominal = EPOCH_EPS
+    eps_nominal = resolve_epoch_eps(getattr(args, "epoch_eps", None), setup.noise_rel)
     objective = getattr(args, "epoch_objective", "mse")
     if objective not in _EPOCH_OBJECTIVES:
         raise ValueError(f"--epoch-objective {objective!r}, expected one of "
@@ -1410,13 +1536,16 @@ def run_epoch_study(args) -> None:
             continue
         hist, best_epoch = load_epoch_history(args.model_dir, model_name)
         print(f"\n[epoch-study] model '{model_name}': {len(ckpts)} epochs, "
-              f"objective={objective}")
+              f"objective={objective}, eps={eps_nominal:g}")
         rows_out: List[Dict[str, float]] = []
         for epoch, ckpt_path in ckpts:
             model = build_models([model_name], radon=radon)[model_name].to(device)
             model.load_state_dict(torch.load(ckpt_path, map_location=device)["state_dict"])
             model.eval()
             adapter = ModelAttackAdapter(model=model, radon=radon, projector=projector)
+            # Every snapshot, of either model, starts from the same random points,
+            # so the weights are the only thing that varies along a curve.
+            set_seed(stage_seed("epoch", objective))
             rows: List[Dict[str, float]] = []
             processed = 0
             for x_gt, clean_init, y_clean in input_cache:
@@ -1442,6 +1571,7 @@ def run_epoch_study(args) -> None:
             rows_out.append({
                 "epoch": epoch, "train_loss": tr, "val_loss": va,
                 "is_best": int(best_epoch is not None and epoch == best_epoch),
+                "eps": eps_nominal,
                 "clean_rel_l2_median": m.get("clean_rel_l2_median", float("nan")),
                 "adv_rel_l2_mean": m.get("adv_rel_l2_mean", float("nan")),
                 "adv_rel_l2_median": m.get("adv_rel_l2_median", float("nan")),
@@ -1526,7 +1656,7 @@ def parse():
     # ---- run size ----
     parser.add_argument("--max-samples", type=int, default=128,
                         help="Test samples to attack. The one genuine dial: the suite and the "
-                            "epoch study run at different budgets.")
+                            "epoch study run on different sample counts.")
     
     # ---- optional analysis ----
     parser.add_argument("--epoch-study", action="store_true",
@@ -1559,6 +1689,10 @@ def parse():
                         help="Skip the attacks and only estimate the Lipschitz gains of "
                              "the best checkpoints, merging them into an existing "
                              "lipschitz.json. Takes minutes rather than hours.")
+    parser.add_argument("--epoch-eps", type=float, default=None,
+                        help="Budget of --epoch-study (fraction of ||y||). Default: "
+                             "noise_sigma_rel from summary.json, the budget of the "
+                             "attack suite.")
     parser.add_argument("--epoch-objective", default="mse",
                         choices=sorted(_EPOCH_OBJECTIVES),
                         help="PGD objective of --epoch-study. 'mse' (the total error) "

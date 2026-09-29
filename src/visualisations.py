@@ -235,19 +235,37 @@ def save_examples(
         return
 
     for idx, row in enumerate(example_rows):
-        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-        images = [
+        clean_pred_title = "Clean Pred" + _metric_caption(row.get("m_clean_pred"))
+        adv_pred_title = "Adv Pred" + _metric_caption(row.get("m_adv_pred"))
+        top = [
             (row["x_gt"], "Ground Truth", "gray"),
             (row["clean_init"], "Clean Init" + _metric_caption(row.get("m_clean_init")), "gray"),
             (row["adv_init"], "Adv Init" + _metric_caption(row.get("m_adv_init")), "gray"),
             (row["delta"], "Sinogram Delta", "viridis"),
-            (row["clean_pred"], "Clean Pred" + _metric_caption(row.get("m_clean_pred")), "gray"),
-            (row["adv_pred"], "Adv Pred" + _metric_caption(row.get("m_adv_pred")), "gray"),
+        ]
+        bottom = [
+            (row["clean_pred"], clean_pred_title, "gray"),
+            (row["adv_pred"], adv_pred_title, "gray"),
             (row["clean_y"], "Clean Sino", "gray"),
             (row["adv_y"], "Adv Sino", "gray"),
         ]
-        for ax, (img, title, cmap) in zip(axes.reshape(-1), images):
-            im = ax.imshow(img, cmap=cmap, aspect="auto" if img.ndim == 2 and img.shape[0] != img.shape[1] else None)
+        if "target" in row:
+            # A targeted attack is judged by how close it came to its target:
+            # show the target, and what separates the attacked prediction from it.
+            bottom[0] = (row["clean_pred"], clean_pred_title
+                         + "\nd_target=%.3f" % row.get("tgt_dist_clean", float("nan")), "gray")
+            bottom[1] = (row["adv_pred"], adv_pred_title
+                         + "\nd_target=%.3f" % row.get("tgt_dist_adv", float("nan")), "gray")
+            top.append((row["target"], "Target", "gray"))
+            bottom.append((row["adv_pred"] - row["target"], "Adv Pred − Target", "RdBu_r"))
+        ncols = len(top)
+        fig, axes = plt.subplots(2, ncols, figsize=(4 * ncols, 8))
+        for ax, (img, title, cmap) in zip(axes.reshape(-1), top + bottom):
+            kw = {}
+            if cmap == "RdBu_r":
+                vabs = max(float(np.abs(img).max()), 1e-12)
+                kw = {"vmin": -vabs, "vmax": vabs}
+            im = ax.imshow(img, cmap=cmap, aspect="auto" if img.ndim == 2 and img.shape[0] != img.shape[1] else None, **kw)
             ax.set_title(title, fontsize=9)
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -469,6 +487,54 @@ def save_null_growth_headline(
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_dir / "headline_null_growth.png", dpi=150)
+    plt.close(fig)
+
+
+def save_target_distance_plot(
+    out_dir: Path,
+    rows_by_model: Dict[str, List[Dict]],
+    eps: float,
+    attack_name: str,
+) -> None:
+    """For a targeted attack: the distance of the reconstruction to the target,
+    relative to ||x_gt - t|| (1 at the ground truth, 0 at the target), clean and
+    attacked, and the attacked distance split into its range and null-space
+    component. The share of samples that end closer to the target than to the
+    ground truth is written above each model. No-op for untargeted attacks."""
+    models = [m for m in rows_by_model
+              if rows_by_model[m] and "tgt_dist_adv" in rows_by_model[m][0]]
+    if not models:
+        return
+    series = [
+        ("tgt_dist_clean", "clean", "#9ecae1"),
+        ("tgt_dist_adv", "adversarial", "#d62728"),
+        ("tgt_dist_adv_ran", "adversarial, range part", "#7f7f7f"),
+        ("tgt_dist_adv_nul", "adversarial, null-space part", "#ff9896"),
+    ]
+    series = [s for s in series if s[0] in rows_by_model[models[0]][0]]
+    x = np.arange(len(models))
+    w = 0.8 / len(series)
+    fig, ax = plt.subplots(figsize=(1.8 * len(models) + 4, 5))
+    tops = np.zeros(len(models))
+    for k, (key, label, color) in enumerate(series):
+        vals = [_median_of(rows_by_model[m], key) for m in models]
+        ax.bar(x + (k - (len(series) - 1) / 2) * w, vals, w, label=label, color=color)
+        tops = np.fmax(tops, vals)
+    for xi, m, top in zip(x, models, tops):
+        rate = float(np.mean([r["tgt_success"] for r in rows_by_model[m]]))
+        ax.annotate("closer to target: %.0f%%" % (100 * rate), (xi, max(top, 1.0)),
+                    textcoords="offset points", xytext=(0, 4), ha="center", fontsize=8)
+    ax.set_ylim(0, 1.12 * max(float(np.nanmax(tops)), 1.0))
+    ax.axhline(1.0, color="0.4", ls=":", lw=1)
+    ax.set_xticks(x)
+    ax.set_xticklabels(models)
+    ax.set_ylabel("||x_hat - t|| / ||x_gt - t||  (median)")
+    ax.set_title("Distance to the target (%s, eps=%g)%s\n1 = ground truth, 0 = target reached"
+                 % (attack_name, eps, _init_tag()), fontsize=9)
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "target_distance.png", dpi=150)
     plt.close(fig)
 
 
@@ -1040,9 +1106,12 @@ def save_epoch_attackability_plot(csv_path, out_path,
         handles.append(bl)
         bl.set_label(f"best-val epoch ({int(best[0])})")
     ax.legend(handles=handles, fontsize=8, loc="best")
-    ax.set_title("Attackability vs epoch — %s%s\n"
+    # Older studies wrote no eps column; they all ran at eps = 0.01.
+    eps = rows[0].get("eps", float("nan"))
+    eps_tag = "  |  eps=%g" % eps if np.isfinite(eps) else ""
+    ax.set_title("Attackability vs epoch — %s%s%s\n"
                  "adv rel-L2 rising while val loss diverges from train => "
-                 "attackability tracks overfitting" % (Path(csv_path).stem, _init_tag()),
+                 "attackability tracks overfitting" % (Path(csv_path).stem, eps_tag, _init_tag()),
                  fontsize=9)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
@@ -1299,6 +1368,7 @@ def render_init(init_dir: Path, on_step=None) -> None:
             save_null_growth_headline(attack_dir, rows_by_model, eps, attack_name)
             save_consistency_plot(attack_dir, rows_by_model, eps)
             save_ghost_structure_plot(attack_dir, rows_by_model, eps, attack_name)
+            save_target_distance_plot(attack_dir, rows_by_model, eps, attack_name)
             all_rows[attack_name] = rows_by_model
 
         transfer_json = attack_dir / "transfer.json"

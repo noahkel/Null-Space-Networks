@@ -528,6 +528,94 @@ def test_make_other_sample_target_is_derangement():
     single = x_gt[:1]
     assert torch.allclose(attack.make_other_sample_target(single), single)
 
+
+def test_make_other_sample_target_is_reproducible_with_a_generator():
+    x_gt = torch.arange(8, dtype=torch.float64).reshape(8, 1, 1, 1).repeat(1, 1, IMG, IMG)
+    a = attack.make_other_sample_target(x_gt, generator=torch.Generator().manual_seed(3))
+    b = attack.make_other_sample_target(x_gt, generator=torch.Generator().manual_seed(3))
+    assert torch.equal(a, b)
+
+
+def test_suite_targets_are_drawn_once_per_attack():
+    """Both models are attacked towards the same targets, so the draw may not
+    depend on how often it was made before."""
+    x_gt = torch.arange(6, dtype=torch.float64).reshape(6, 1, 1, 1).repeat(1, 1, IMG, IMG)
+    cache = [(x_gt, None, None), (x_gt + 10, None, None)]
+    zero = attack.suite_targets("adversarial_target_zero", cache)
+    assert all(torch.equal(t, torch.zeros_like(e[0])) for t, e in zip(zero, cache))
+    first = attack.suite_targets("adversarial_target_sample", cache)
+    again = attack.suite_targets("adversarial_target_sample", cache)
+    assert all(torch.equal(a, b) for a, b in zip(first, again))
+    for untargeted in ("adversarial", "adversarial_null", "adversarial_range"):
+        assert attack.suite_targets(untargeted, cache) == [None, None]
+    assert attack._SUITE_SCORED_BY_TARGET == {
+        name for name in attack._SUITE_ATTACKS if name.startswith("adversarial_target")}
+
+
+def test_stage_seeds_are_fixed_and_distinct():
+    assert attack.stage_seed("suite", "adversarial") == attack.stage_seed("suite", "adversarial")
+    assert len({attack.stage_seed("suite", a) for a in attack._SUITE_ATTACKS}) == len(attack._SUITE_ATTACKS)
+    assert attack.stage_seed("lipschitz", "null") != attack.stage_seed("epoch", "null")
+    assert 0 <= attack.stage_seed("targets", "adversarial_target_sample") < 2 ** 31
+
+
+def test_target_distance_is_one_at_the_ground_truth_and_zero_at_the_target(radon):
+    g = torch.Generator().manual_seed(0)
+    x = torch.rand(1, 1, IMG, IMG, generator=g, dtype=torch.float64)
+    t = torch.rand(1, 1, IMG, IMG, generator=g, dtype=torch.float64)
+    mid = 0.5 * (x + t)
+    d = attack.target_distance_metrics(x, t, clean_pred=x, adv_pred=t,
+                                       clean_init=mid, adv_init=mid, radon=radon)
+    assert d["tgt_dist_clean"] == pytest.approx(1.0)
+    assert d["tgt_dist_adv"] == pytest.approx(0.0, abs=1e-12)
+    assert d["tgt_dist_init_clean"] == pytest.approx(0.5)
+    assert d["tgt_closed"] == pytest.approx(1.0)
+    assert d["tgt_success"] == 1.0
+    # the channel split of the distance is orthogonal
+    assert d["tgt_dist_clean_ran"] ** 2 + d["tgt_dist_clean_nul"] ** 2 == pytest.approx(1.0)
+
+
+def test_target_distance_to_the_zero_image_is_relative_to_the_ground_truth():
+    x = torch.rand(1, 1, IMG, IMG, generator=torch.Generator().manual_seed(1), dtype=torch.float64)
+    zero = torch.zeros_like(x)
+    near = attack.target_distance_metrics(x, zero, x, 0.25 * x, x, x)
+    assert near["tgt_dist_adv"] == pytest.approx(0.25)
+    assert near["tgt_closed"] == pytest.approx(0.75)
+    assert near["tgt_success"] == 1.0                  # closer to 0 than to x
+    assert "tgt_dist_adv_ran" not in near              # no operator, no split
+    far = attack.target_distance_metrics(x, zero, x, 0.75 * x, x, x)
+    assert far["tgt_success"] == 0.0
+
+
+def test_evaluate_batch_scores_the_distance_to_the_target():
+    r = FakeRadon(img=8, seed=3)
+    B = 3
+    x_gt = torch.rand(B, 1, r.IMG, r.IMG, dtype=torch.float64)
+    target = torch.rand(B, 1, r.IMG, r.IMG, dtype=torch.float64)
+    clean_pred = x_gt + 0.02 * _rand(B, 1, r.IMG, r.IMG)
+    adv_pred = 0.5 * (x_gt + target)
+    clean_y = r.forward_la(x_gt)
+    adv_y = clean_y + 0.05 * _rand(B, 1, r.LA_ROWS, 1)
+    init = x_gt + 0.01 * _rand(B, 1, r.IMG, r.IMG)
+    kw = dict(x_gt=x_gt, clean_init=init, clean_y=clean_y, clean_pred=clean_pred,
+              adv_init=init, adv_y=adv_y, adv_pred=adv_pred, delta=adv_y - clean_y,
+              success_mse_factor=2.0, radon=r)
+    rows = attack.evaluate_batch(**kw, target=target)
+    assert rows[0]["tgt_dist_adv"] == pytest.approx(0.5)
+    assert "tgt_dist_adv_nul" in rows[0]
+    summary = attack.summarize_metrics(rows)
+    assert summary["tgt_dist_adv_median"] == pytest.approx(0.5)
+    assert "tgt_success_mean" in summary
+    assert "tgt_dist_adv" not in attack.evaluate_batch(**kw)[0]
+    assert "tgt_dist_adv" in attack._AGGREGATE_METRICS
+
+
+def test_epoch_study_budget_defaults_to_the_noise_level():
+    assert attack.resolve_epoch_eps(None, 0.02) == 0.02
+    assert attack.resolve_epoch_eps(0.01, 0.05) == 0.01
+    with pytest.raises(ValueError):
+        attack.resolve_epoch_eps(None, 0.0)
+
 # =========================================================================== #
 # Real-operator / real-model integration tests.
 #
@@ -844,6 +932,37 @@ def test_save_consistency_overview_and_ghost_structure(tmp_path):
     assert (init_dir / "adversarial" / "ghost_structure.png").exists()
     V.save_consistency_overview(init_dir, {"adversarial": rows_by_model}, 0.05)
     assert (init_dir / "consistency_overview.png").exists()
+
+
+def _example_row(rng, **extra):
+    row = {k: rng.random((16, 16))
+           for k in ("x_gt", "clean_init", "adv_init", "clean_pred", "adv_pred")}
+    row.update({k: rng.random((20, 23)) for k in ("delta", "clean_y", "adv_y")})
+    row.update(extra)
+    return row
+
+
+def test_targeted_examples_show_the_target(tmp_path):
+    V = _vis()
+    rng = np.random.default_rng(0)
+    V.save_examples(tmp_path, [_example_row(rng)])
+    untargeted = (tmp_path / "example_000.png").stat().st_size
+    V.save_examples(tmp_path, [_example_row(rng, target=rng.random((16, 16)),
+                                            tgt_dist_clean=1.0, tgt_dist_adv=0.4)])
+    assert (tmp_path / "example_000.png").stat().st_size != untargeted
+
+
+def test_target_distance_plot_only_for_targeted_attacks(tmp_path):
+    V = _vis()
+    rows = [{"tgt_dist_clean": 1.0, "tgt_dist_adv": 0.6, "tgt_dist_adv_ran": 0.3,
+             "tgt_dist_adv_nul": 0.5, "tgt_success": 1.0}] * 4
+    V.save_target_distance_plot(tmp_path, {"resnet": rows, "nsn": rows}, 0.01,
+                                "adversarial_target_zero")
+    assert (tmp_path / "target_distance.png").exists()
+    other = tmp_path / "untargeted"
+    other.mkdir()
+    V.save_target_distance_plot(other, {"resnet": [{"adv_rel_l2": 0.4}]}, 0.01, "adversarial")
+    assert not (other / "target_distance.png").exists()
 
 
 def test_clean_consistency_in_aggregate_metrics():
@@ -2122,6 +2241,29 @@ def test_cache_round_trip_restores_the_factors(tmp_path):
     dst._load_cache(path)
     for name in ("_A", "_A_la", "_U_k_la", "_s_k_la", "_Vt_k_la"):
         assert torch.allclose(getattr(dst, name), getattr(src, name)), name
+
+
+def test_cache_save_leaves_no_scratch_and_keeps_a_finished_entry(tmp_path):
+    """The entry is written aside and renamed into place, so a killed job
+    leaves nothing that looks finished, and a second writer keeps the first."""
+    src = _cache_shell()
+    g = torch.Generator().manual_seed(0)
+    src._A = torch.randn(4, 4, generator=g, dtype=torch.float64)
+    src._A_la = src._A[:2].clone()
+    path = tmp_path / "key"
+    src._save_cache(path)
+    assert (path / "A.npz").exists() and not list(tmp_path.glob("key.tmp*"))
+    first = (path / "A.npz").read_bytes()
+    src._A = 2 * src._A
+    src._save_cache(path)
+    assert (path / "A.npz").read_bytes() == first and not list(tmp_path.glob("key.tmp*"))
+
+
+def test_cache_lock_can_be_taken(tmp_path):
+    from src.radon import _cache_lock
+    with _cache_lock(tmp_path / "cache" / "key"):
+        with _cache_lock(tmp_path / "cache" / "other"):
+            pass
 
 
 def test_a_corrupted_cache_entry_is_refused_on_load(tmp_path):
