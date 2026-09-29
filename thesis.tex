@@ -402,7 +402,7 @@ $\mathcal{L}_{\mathcal{N}(\mathbf{A})}$ forces the attack to damage the null-spa
 the only part of the reconstruction the Nullspace Network can actually modify. The residual network is free to act in this
 component as well, so restricting the attack to it compares the two networks on the ground where both of them work.
 Maximising $\mathcal{L}_{{\mathcal{N}(\mathbf{A})}^\perp}$ gives the complementary attack and serves as a control. Against the Nullspace Network
-it can only ever attack the pseudoinverse, by Proposition~\ref{prop:range}\,(i). Against the residual U-Net it shows how far a small perturbation can move the measured part of the reconstruction.
+it can only ever attack the pseudoinverse. Against the residual U-Net it shows how far a small perturbation can move the measured part of the reconstruction.
 \subsubsection{Targeted Adversarial Attacks using Examples}\label{sec:targeted}
 A second modification alters the attack objective so that it no longer drives the reconstruction \emph{away} from the ground truth,
 but \emph{towards} a prescribed image. Attacks of this kind are called targeted attacks.
@@ -2031,7 +2031,7 @@ are larger than they would be at a pseudoinverse-optimal threshold. The residual
 removes more than $90\%$ of the range component, can be expected to be much less affected. The
 threshold that is optimal for the pseudoinverse need not be optimal for a network that corrects it,
 since a larger threshold also enlarges the null space the network has to fill.
-%PersonalTODO: Add reference to optimal tau study big in japan
+%PersonalTODO: Add reference to optimal tau study "big in japan"
 At $\sigma_\text{rel}=0.01$ the optimal threshold $\tau=1.1\cdot10^{-2}$ enlarges $\mathcal{N}(\mathbf{A})$ from $5\,234$ to $6\,543$ dimensions, by
 $25\%$.\\
 The per-channel results above are stated on the split at $\tau=4\cdot10^{-3}$, and whether they depend
@@ -2077,8 +2077,8 @@ $\lVert\mathbf{e}_{\mathcal{N}}\rVert$ & $\lVert\mathbf{e}_{\mathcal{N}^\perp}\r
 \end{tabular}
 \end{table}
 The pseudoinverse behaves as the study predicts. As $\tau$ grows, its range error falls, from $2.069$
-to $0.054$, and its null-space error rises, from $0.197$ to $0.406$, since a growing part of the phantom
-goes unmeasured; its total error is smallest at the optimum $\tau=1.1\cdot10^{-2}$, $0.336$. At
+to $0.054$, and its null-space error rises, from $0.197$ to $0.406$.
+Its total error is smallest at the optimum $\tau=1.1\cdot10^{-2}$, $0.336$. At
 $\tau=4.4\cdot10^{-4}$ it amplifies by up to $1/\tau\approx2\,300$, and with a relative error of $2.08$
 its reconstruction is dominated by amplified noise.\\
 The Nullspace Network inherits the range floor exactly at every threshold, so its total error follows
@@ -2095,7 +2095,7 @@ $\tau$ grows, from a factor of $12$ at the reference threshold to $2.6$ at $\tau
 null-space component the order of Table~\ref{tab:clean} persists at every threshold: the clean
 null-space error of the Nullspace Network is $0.0147$, $0.0092$, $0.0111$ and $0.0146$, against $0.0464$,
 $0.0160$, $0.0122$ and $0.0179$ for the residual network.\\
-Under attack, the threshold sets the lever of the pseudoinverse. The bound
+Under attack, the threshold sets the amplification of the pseudoinverse. The bound
 $\varepsilon(1+\sigma_\text{rel})/\tau$ of Section~\ref{sec:results-general} on the growth of the range
 component is $23$, $2.5$, $0.92$ and $0.16$ at the four thresholds, and at the three smaller ones the
 median growth under the untargeted attack follows it, with $8.78$, $0.96$ and $0.33$, between $36\%$ and
@@ -2105,7 +2105,7 @@ $0.046$, $28\%$ of a bound that has itself become short, and the untargeted atta
 $92\%$ of the attacked error of the Nullspace Network lies in the null space, against $2\%$ at the
 reference threshold. As on the multi-ellipse phantoms at $\tau=2.5\cdot10^{-2}$
 (Section~\ref{sec:results-data}), the untargeted attack on the Nullspace Network becomes a null-space
-attack by itself once the lever is short enough. This is also the only run of this work in which the
+attack by itself once tau is large enough. This is also the only run of this work in which the
 untargeted attack leaves the Nullspace Network with the smaller total error, a median of $0.22$ against
 $0.26$ for the residual network; under the null-space attack the two are level, at $0.27$ and $0.26$.\\
 The comparison on the null space does depend on the threshold (Table~\ref{tab:robustness}). The paired
@@ -2187,7 +2187,7 @@ the correction of the Nullspace Network is the more vulnerable of the two.\\
 Another observation is that at $\tau=2.5\cdot10^{-2}$ the amplification bound for the pseudoinverse shrinks to $0.40$,
 and the untargeted attack on the Nullspace Network no longer finds the range component the cheapest target:
 $97\%$ of its attacked error lies in the null space,
-against $8\%$ at $\tau=4\cdot10^{-3}$ (Table~\ref{tab:prop}). With a lever this short, the untargeted
+against $8\%$ at $\tau=4\cdot10^{-3}$ (Table~\ref{tab:prop}). With a truncation this coarse, the untargeted
 attack on the Nullspace Network becomes a null-space attack by itself, as it does on single ellipses at
 $\tau=6.2\cdot10^{-2}$ (Section~\ref{sec:results-tau}).
 
