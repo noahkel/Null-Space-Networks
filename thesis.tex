@@ -49,8 +49,10 @@
 \lstset{style=mystyle}
 
 
-
+%TODO: Merge Bibs
 \addbibresource{references.bib}
+\addbibresource{references_new.bib}
+
 \DeclareMathOperator*{\argmax}{arg\,max}
 \title{Nullspace Networks and Adversarial Attacks in Limited-Angle Computed Tomography}
 \author{Noah }
@@ -64,25 +66,30 @@ Neural networks that post-process a classical reconstruction are a promising app
 limited-angle computed tomography, but they are known to be vulnerable to small, deliberate
 perturbations of the measurements. This thesis asks whether the Nullspace Network, which may only
 add structure that the measurements cannot see and is therefore exactly data consistent, is more
-robust than an unconstrained residual U-Net. Both networks correct the same truncated
+robust than an conventional, unconstrained residual U-Net. Both networks correct the same truncated
 pseudoinverse reconstruction and are attacked by projected gradient ascent with an $\ell_2$ budget
 equal to the measurement noise and confined to the subspace in which the noise lives. Decomposing
 every error into its null-space and range components shows that a plain attack on the Nullspace
 Network only measures the noise amplification of the pseudoinverse, which the network inherits and
-cannot influence. We therefore introduce attacks restricted to one of the two subspaces. At a
-relative noise level of $1\%$, the attack restricted to the null space, the only component both
-networks control, raises the median null-space error of the Nullspace Network from $0.65\%$ to $37\%$
-of the norm of the ground truth, the same level it reaches for the residual U-Net. Across four noise
-levels, two truncation thresholds and two families of phantoms, the attacked null-space errors of the
-two networks stay within $15\%$ of each other, and on phantoms made of several ellipses the Nullspace
-Network is the more vulnerable of the two. Data consistency
-thus does not make the learned correction more robust.
+cannot influence. We therefore introduce  an attack, that is restricted to the null-space, where both networks can act upon.
+At a relative noise level of $1\%$, the null-space attack, raises the median null-space error of the Nullspace Network from $0.69\%$ to $38\%$
+of the norm of the ground truth.
+%TODO: for the residual U-Net, the error increases from... to 43%.
+against $43\%$ for the residual U-Net. In $18$ experiments over four
+noise levels, four truncation thresholds and two families of phantoms, the null-space attack raises the
+null-space error of the Nullspace Network at least eightfold and to the order of magnitude it reaches
+for the residual U-Net. Neither of the two networks performs consistently better than the other.
+Data consistency alone thus does not make the learned correction robust.
 \end{abstract}
 \tableofcontents
 
 \section{Introduction}
 Computed tomography (CT) is an important diagnostic tool in modern medicine, used to identify a wide range of injuries and diseases inside the body, for example to screen the chest for viral and bacterial pneumonia, tuberculosis or lung cancer, and the bones and teeth for fractures and infections \parencite{CT-Scan}. Reconstructing an image of the tissue from the measurements is an inverse problem, which is usually solved with the filtered back projection. When applied to measurements from a limited-angle CT scan, however, this reconstruction produces artifacts and unsatisfactory image quality \parencite{CT-LA-CNN}. Because the limited-angle problem is severely ill-posed, an accurate reconstruction method for this setting has yet to be found. Reconstruction with neural networks is a promising approach, since neural networks have been used successfully for many kinds of inverse problems.
-One major disadvantage of such reconstruction methods, however, is their vulnerability to deliberate manipulations of the input \parencite{instab}. Since CT scans are performed all over the world, a vulnerable reconstruction method would pose a risk to patient safety. This is why this thesis investigates the robustness of such reconstruction methods.\\
+One major disadvantage of such reconstruction methods, however, is their vulnerability to deliberate manipulations of the input \parencite{instab}, which has also been observed for limited-angle tomography specifically \parencite{huang2018robustness}.
+%TODO: Check reference for existence and validity.
+Since CT scans are performed all over the world, a vulnerable reconstruction method would pose a risk to patient safety. This is why this thesis investigates the robustness of such reconstruction methods.\\
+%TODO: Read the evidence below!
+The evidence on this point is not one-sided. Genzel et al.\ found standard reconstruction networks to be about as robust against adversarial perturbations as total-variation minimisation \parencite{genzel2023robustness}, and Darestani et al.\ found learned methods no less robust than classical sparsity-based ones \parencite{darestani2021measuring}. Gottschling et al.\ trace instabilities and hallucinations to the kernel of the forward operator whenever it is nontrivial \parencite{gottschling2025troublesome}, and Bhadra et al.\ define hallucinations as the part of a reconstruction error that lies in that kernel \parencite{bhadra2021hallucinations}. In limited-angle CT the kernel is large. Architectures that treat it explicitly, such as the Nullspace Network studied here, are therefore natural candidates for a more robust reconstruction, and whether they are is the question of this thesis.\\
 Before we describe how the reconstruction method works and how we attack it, we first need to understand how computed tomography, and limited-angle computed tomography in particular, actually works.
 \subsection{Limited-angle CT}
 To understand how a CT scan works, let us first look at conventional X-ray imaging. Sending an X-ray through body tissue and measuring its intensity on the other side of the body measures how strongly the tissue along the ray attenuates it, that is, the integral of the tissue's attenuation coefficient along the ray. By arranging X-ray emitters and detectors in a plane and placing the tissue to be investigated between them, an X-ray image can be produced.\\
