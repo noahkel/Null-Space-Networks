@@ -107,8 +107,9 @@ CT relies on the same mechanism of tissue attenuating X-rays according to its de
 \\
 The number of measurements taken during a CT scan depends on the number of angles and the number of detectors. More measurements mean a longer scan and a higher radiation dose for the patient.\\
 Research on ways to reduce the number of measurements while still producing sufficiently accurate reconstructions is therefore of both economic and medical interest. One way to reduce the number of measurements is to measure at fewer angles while retaining the total angular coverage, for example by measuring in steps of $2^\circ$ instead of $1^\circ$, which halves the number of measurements.\\
-Another way, and the focus of this work, is to reduce the total range of angles covered. Instead of measuring across the full range from $0^\circ$ to $180^\circ$, one measures only from $0^\circ$ to $120^\circ$. This is called limited-angle CT\@. It is severely ill-posed, and methods like the filtered back projection, which work well for conventional CT scans, fail to provide good reconstructions \parencite{CT-LA-CNN}.\\
-The reconstruction method used in this thesis combines a neural network with a classical reconstruction step. Classical reconstruction methods are better understood and provide a good initial reconstruction, which serves as a useful input to the neural network. The network then only needs to learn the difference between the ground truth and the classical reconstruction.
+%TODO: Check references and theis claim!!!
+Another way, and the focus of this work, is to reduce the total range of angles covered. Instead of measuring across the full range from $0^\circ$ to $180^\circ$, one measures only from $0^\circ$ to $120^\circ$. This is called limited-angle CT\@. Limited angular ranges are also imposed by the hardware in clinical practice; digital breast tomosynthesis, for example, covers only between $15^\circ$ and $50^\circ$ \parencite{winter2021dbt}. The problem is severely ill-posed \parencite{davison1983illconditioned}: only those edges of the object whose normals point along a measured direction are stably recovered \parencite{quinto1993singularities}, and methods like the filtered back projection, which work well for conventional CT scans, produce characteristic streak artifacts and fail to provide good reconstructions \parencite{CT-LA-CNN,frikel2013artifacts}.\\
+The reconstruction method used in this thesis combines a neural network with a classical reconstruction step, one of the standard ways of bringing learning into inverse problems \parencite{arridge2019solving}. Classical reconstruction methods are better understood and provide a good initial reconstruction, which serves as a useful input to the neural network. The network then only needs to learn the difference between the ground truth and the classical reconstruction.
 \subsection{Pseudoinverse}\label{sec:pseudoinverse}
 The Radon transform models the X-ray measurement process. It maps a function to its integrals along lines and is defined as
 \[\mathcal{R}f(L):=\int_L f(\mathbf{x})\,d\mathbf{x},\]
@@ -142,8 +143,10 @@ $\texttt{torch.linalg.svd}$ is already sorted this way. The pseudoinverse of $\m
 \midrule
 \Block{1-3}{\text{\Huge 0}} & & & \text{\Huge 0}                                  \\
 \end{pNiceArray}\mathbf{U}^*\]
-The pseudoinverse maps a sinogram back to an axial image. Real-world measurements are never free of noise, so to represent them faithfully we add noise to the simulated data, and noisy data reveal a problem of the pseudoinverse. Because the problem is severely ill-posed, the singular values $\sigma_i$ decay rapidly towards zero, so the singular values $1/\sigma_i$ of the pseudoinverse grow just as rapidly. White noise has, in expectation, the same energy in every singular direction, so the pseudoinverse amplifies it most in exactly those directions where the signal is weakest, and the amplified noise can overshadow the signal. To counteract this one uses a truncated pseudoinverse, which sets all singular values below a threshold, $\sigma_i<\tau\sigma_{\max}$, to zero. These remain zero when inverting, so the amplification is bounded by $1/(\tau\sigma_{\max})$.\\
-This gives rise to a nontrivial null space $\mathcal{N}(\mathbf{A})$ i.e.\ non trivial structures that, when measured, give $0$ measurements. This allows us to decompose the space $\mathbb{R}^n$ into $\mathcal{N}(\mathbf{A})$ and ${\mathcal{N}(\mathbf{A})}^\perp$ which will be of use later in this work.\\
+The pseudoinverse maps a sinogram back to an axial image. Real-world measurements are never free of noise, so to represent them faithfully we add noise to the simulated data, and noisy data reveal a problem of the pseudoinverse. Because the problem is severely ill-posed,
+%TODO: Check citation and claim
+the singular values $\sigma_i$ decay rapidly towards zero \parencite{louis1986incomplete}, so the singular values $1/\sigma_i$ of the pseudoinverse grow just as rapidly. White noise has, in expectation, the same energy in every singular direction, so the pseudoinverse amplifies it most in exactly those directions where the signal is weakest, and the amplified noise can overshadow the signal. To counteract this one uses a truncated pseudoinverse, which sets all singular values below a threshold, $\sigma_i<\tau\sigma_{\max}$, to zero. These remain zero when inverting, so the amplification is bounded by $1/(\tau\sigma_{\max})$.\\
+This gives rise to a nontrivial null space $\mathcal{N}(\mathbf{A})$ i.e.\ nontrivial structures that, when measured, give $0$ measurements. This allows us to decompose the space $\mathbb{R}^n$ into $\mathcal{N}(\mathbf{A})$ and ${\mathcal{N}(\mathbf{A})}^\perp$ which will be of use later in this work.\\
 To avoid confusion, we now fix the notation used throughout this work. 
 \begin{center}
 \begin{tabular}{lll}
@@ -288,9 +291,14 @@ The residual U-Net is an unconstrained network: it can modify its input in whate
 This can lead to problems, since it can produce predictions that do not agree with the measurements it was given.
 One remedy is the Nullspace Network of Schwab et al.\ \parencite{NSL}. Its architecture is identical to that of the residual U-Net, except
 that the output of the network is projected onto the null space of the forward operator, that is, of the measurement process, before it is added.
-This guarantees data consistency, and we had hoped that the resulting network would also be more robust to adversarial attacks.
-As the results of this work show, this is not the case: robustness to adversarial attacks
-does not come for free with data consistency.\\
+This guarantees data consistency, and one may hope that the resulting network is also more robust to adversarial attacks.
+As the results of this work show, robustness to adversarial attacks
+does not come for free with data consistency: None of the two networks is consistently more robust than the other.\\
+%TODO: Check citations and claims
+Related approaches restrict learning to the part of limited-angle data that the measurement cannot determine, for example to
+the invisible shearlet coefficients \parencite{bubba2019invisible}, or relax the constraint so that the network may also
+correct the measured part within a controlled distance of the data \parencite{goeppel2023dataproximal}; the latter has been
+compared with a residual and a Nullspace Network for limited-view CT \parencite{goeppel2025bvm}.\\
 To use a Nullspace Network, one needs a projection onto the null space of the forward operator.
 This is where the singular value decomposition is useful once more,
 since the orthogonal matrix $\mathbf{V}$ gives the null-space projection directly.
@@ -317,17 +325,24 @@ The complement ${\mathcal{N}(\mathbf{A})}^\perp=\operatorname{range}(\mathbf{A}^
 For the Nullspace Network the range component is identical to that of the initial reconstruction, whatever the network predicts.
 We refer to it as the \emph{range floor}. In the range component the Nullspace Network can therefore never match the unconstrained residual network,
 which is free to correct this component and does.\\
-The projection decomposes the space of reconstructions into the null space $\mathcal{N}$ and its complement $\mathcal{N}^\perp$. We call the two subspaces the null-space \emph{channel} and the range \emph{channel} of the error.
+The projection decomposes the space of reconstructions into the null space $\mathcal{N}$ and its complement $\mathcal{N}^\perp$.
+We call the two subspaces the null-space \emph{channel} and the range \emph{channel} of the error.
 The decomposition is used both to analyse our attacks and to construct the new type of attack introduced in this work.
+%TODO: Check this citation, does it fit here?
+Its null-space component is what Bhadra et al.\ call a null-space hallucination \parencite{bhadra2021hallucinations}:
+structure that agrees with the measurement but is not present in the object.
 \subsection{Adversarial Attacks}
 An adversarial attack is the deliberate construction of a small perturbation of a specific input to a model that maximises the error of its output, here the error of the reconstruction.
+%TODO: Check this citation
+Such perturbations were first described for image classifiers \parencite{szegedy2014intriguing,goodfellow2015explaining}.
 Attacks differ significantly depending on how this error is measured and how much the threat model lets the attacker know about the model \parencite{advers}.
 In this work we use adversarial attacks to investigate the robustness of the residual U-Net and the Nullspace Network.
 The next section describes adversarial attacks in more detail and explains the modifications we made to the general attack framework to evaluate our models more fairly.\\
 \section{Theory behind Adversarial Attacks}
 Let $\mathcal{F}_\theta:\mathbf{Y}\to\mathbf{X}$ denote any reconstruction method going from the space of measurements to
 the space of images. This section describes the methods we use to attack $\mathcal{F}_\theta$.
-\subsection{Adversarial Attacks}\label{sec:attacks}
+%TODO: does this title fit better?
+\subsection{Threat model and projected gradient ascent}\label{sec:attacks}
 An adversarial attack depends heavily on the threat model, which defines how much information the attacker is given and how the success of the attack is measured.
 The attacks investigated in this work are so-called white-box attacks. Unlike a black-box attacker, a white-box attacker has complete knowledge of the reconstruction method;
 in our case the attacker knows the exact model architecture as well as its weights. Such an attack is much more powerful than a black-box attack,
@@ -458,6 +473,7 @@ for the matrix products of Section~\ref{sec:pinv} is again a matrix product, and
 why the gradient of an attack can travel from the reconstruction back into the
 measurements.
 Every number reported in this thesis was produced with PyTorch 2.3.1 on a single NVIDIA RTX A6000.\\
+%TODO: confirm version and GPU for the 18 new runs in the Slurm logs (printed at the start of every job).
 Two shapes occur throughout. An image is a tensor of shape $(B,C,H,W)$ (batch,
 channel, height and width of the image), and a sinogram is a tensor of shape
 $(B,C,n_\theta,n_d)$ (batch, channel, projection angle, detector element).
