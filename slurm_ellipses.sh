@@ -2,7 +2,7 @@
 # DIVAL's multi-ellipse phantoms in place of the single ellipse, at one noise
 # level: whether the findings carry over to images with more structure. Two
 # runs, at the reference tau and at the tau where the truncation study finds
-# the pseudoinverse best for these phantoms.
+# the pseudoinverse best for these phantoms (run once, before the two runs).
 #
 #   sbatch slurm_ellipses.sh
 #
@@ -27,13 +27,23 @@ source "$REPO_DIR/run_pipeline.sh"
 setup_env
 
 NOISE=0.01
-# Where the pseudoinverse is best for these phantoms at this noise level.
-TAU_OPT=0.025
 
 if [ "${RUN_TESTS:-1}" = 1 ]; then run_tests; fi
 
+# Where the pseudoinverse is best for these phantoms at this noise level, from
+# the truncation study.
+OPT_FILE=$(mktemp)
+pinv_optima ellipses "$OPT_FILE"
+TAU_OPT=$(awk -v n="$NOISE" '$1 + 0 == n + 0 { print $2 }' "$OPT_FILE")
+rm -f "$OPT_FILE"
+if [ -z "$TAU_OPT" ]; then
+    echo "[abort] the truncation study has no optimum for noise $NOISE" >&2
+    exit 1
+fi
+
 for TAU in "$DEFAULT_SVD_THRESH" "$TAU_OPT"; do
     run_one "$NOISE" "$TAU" ellipses "$TAU_OPT"
+    if same_tau "$TAU_OPT" "$DEFAULT_SVD_THRESH"; then break; fi
 done
 
 echo "============================================"

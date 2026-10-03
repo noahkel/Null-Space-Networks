@@ -535,6 +535,12 @@ class MatrixRadonAdapter:
         y_full[:, la_mask, :] = y_compact
         return y_full.reshape(B, C, len(self.angles), self.det_count)
 
+    def mask_la(self, y: torch.Tensor) -> torch.Tensor:
+        """The mask M: a full-shape sinogram with the rows of unmeasured angles
+        set to zero, i.e. restricted to the n_la*det_count measured readings."""
+        mask = torch.from_numpy(self._la_mask()).to(device=y.device, dtype=y.dtype)
+        return y * mask.view(-1, 1)
+
     def proj_ran(self, y: torch.Tensor) -> torch.Tensor:
         """
         Project sinogram onto range(A_la) using the SVD left-singular vectors:

@@ -20,6 +20,7 @@ operator. `thesis.tex` is the write-up; this file is how to run it.
 | `slurm_ellipses.sh` | the multi-ellipse phantoms at one noise level, as a job of its own |
 | `run_pipeline.sh` | the stages of one run, shared by both jobs (sourced, not submitted) |
 | `src/truncation.py` | the truncation study of a run: the τ per noise level at which the pseudoinverse is best, how much the channel split depends on τ, candidates for a second truncation |
+| `make_tables.py` | the rows of every results table of the thesis and the numbers its prose cites, from the run directories alone |
 | `tests/test_nsn.py` | the test suite |
 
 ## Running
@@ -34,12 +35,15 @@ sbatch slurm_ellipses.sh     # multi-ellipse phantoms at noise 0.01: 2 runs
 ```
 
 At every noise level `slurm_full_run.sh` runs the reference τ = 4·10⁻³, the τ at
-which the truncation study finds the pseudoinverse best (listed in the script
-and checked against the study by every run), and τ = 4.4·10⁻⁴ and 6.2·10⁻²,
-which halve and double dim N(A). Each run goes through the tests' environment,
-the truncation study, data, training, the attack suite with the Lipschitz
-estimate, the epoch study (total and null-space error) and the figures; a
-failing stage aborts the job.
+which the truncation study finds the pseudoinverse best (the job runs the study
+once before it builds the run matrix, and every run checks it again), and
+τ = 4.4·10⁻⁴ and 6.2·10⁻², which halve and double dim N(A). Each run goes
+through the tests' environment, the truncation study, data, training, the attack
+suite with the Lipschitz estimate, the budget sweep, the epoch study (total and
+null-space error) and the figures; a failing stage aborts the job. At the
+reference and the optimal τ both models are trained again with the seeds
+`EXTRA_SEEDS` (default `1 2`) and attacked by the suite, into `seed<s>/` of the
+run's model and output directories.
 
 A run reuses the data when its `summary.json` exists and the models when every
 model has its `_history.json` (both are written last), after checking that the
@@ -54,7 +58,13 @@ shows up before a day of training.
 sbatch --export=ALL,NOISES=0.02 slurm_full_run.sh      # one noise level only
 sbatch --export=ALL,FORCE_RUN=1 slurm_full_run.sh      # redo finished runs
 sbatch --export=ALL,FORCE_TRAIN=1 slurm_full_run.sh    # retrain on the existing data
+sbatch --export=ALL,EXTRA_SEEDS= slurm_full_run.sh     # no extra seeds
+sbatch --export=ALL,CHECKPOINT_EVERY=1 slurm_full_run.sh  # epoch study at every epoch
 ```
+
+All directories of these runs carry the tag `RUN_TAG` (default `_v2`): the data,
+models and results of the earlier runs, whose noise was confined to range(U_k),
+stay where they are, and the stages refuse data without the new noise model.
 
 A truncation or phantom family other than the reference writes to its own data,
 model and output directories (`..._tau0.011`, `..._ellipses`), so no run
@@ -69,6 +79,7 @@ python -m src.truncation --svd_thresh 4e-3 --run_noise 0.01 --out attacks_n0.01/
 python -m src.create_phantom_data --noise 0.01 --out_dir data
 python train.py --data_dir data/0.01 --out_dir models/0.01 --checkpoint-every 1
 python attack.py --data-root data/0.01 --model-dir models/0.01 --lipschitz
+python attack.py --data-root data/0.01 --model-dir models/0.01 --budget-sweep 0.25,0.5,1,2,4 --max-samples 64
 python attack.py --data-root data/0.01 --model-dir models/0.01 --epoch-study --max-samples 32
 python attack.py --data-root data/0.01 --model-dir models/0.01 --epoch-study --epoch-objective null --max-samples 32
 python visualise.py attacks_n0.01
@@ -77,14 +88,24 @@ python visualise.py attacks_n0.01
 `truncation` and `create_phantom_data` must be run with `-m`, since they import
 from `src`.
 
+Once the runs are finished, the tables of the thesis come from
+
+```bash
+python make_tables.py --runs 'attacks_*_v2' --out thesis_tables
+```
+
+which writes the LaTeX rows of every results table and `numbers.txt` with the
+values the text cites (medians, paired differences with bootstrap intervals,
+Wilcoxon tests with Holm correction, the share of the exact worst case, seeds).
+
 ## Conventions worth knowing
 
-- **One operator, one truncation.** Noise, reconstruction, attack and the
-  data-consistency residual all use the operator truncated at the run's τ
-  (4·10⁻³ for the reference runs).
-  Drawing the noise from a second, untruncated operator delivered only 82 % of
-  the nominal noise to the reconstruction while the attack budget was fully
-  effective; the truncation study reports this number with every run.
+- **Noise on every measured reading.** The noise is a standard normal draw on
+  all m measured readings, rescaled to σ‖y‖ per sample, the same draw at every τ
+  (and, rescaled, at every σ). The truncated pseudoinverse receives P_k η, about
+  √(k/m) of it; the truncation study reports this share per τ. An earlier version
+  drew the noise inside range(U_k): the physical noise level then depended on τ,
+  and the readings the truncation discards were noise-free.
 - **τ fixes the channel split.** Every per-channel number - the range floor, the
   null-space error, the null-restricted attack - is stated on the numerical null
   space at τ. `src/truncation.py` evaluates every τ on one decomposition (the
@@ -114,10 +135,22 @@ from `src`.
   it, both models start from the same random points, and along an epoch-study
   curve only the weights change. Training is reproducible closely rather than
   bit for bit, because cuDNN's convolution kernels are not deterministic.
-- **Attack budget** is ε·‖y‖ per sample with ε = σ_rel by default, for the
-  attack suite and the epoch study alike (`--suite-eps` / `--epoch-eps` override
-  it), the step size 2.5·ε_i/50, and of two random restarts the better one is
-  kept per sample.
+- **Attack budget** is κ‖P_k η_i‖ per sample, the noise the reconstruction
+  receives, with κ = 1 by default (`--budget-factor`), for the attack suite and
+  the epoch study alike; the step size is 2.5·ε_i/50. Every PGD iterate is
+  scored, and each sample keeps the best one over all steps and both restarts.
+  For the Nullspace Network the largest range error any perturbation in the
+  budget can cause is computed exactly (a trust-region subproblem), so the
+  `cert_e_ran_max` column says how much the attacks leave on the table. A
+  `random_baseline` "attack" spends the full budget in a random direction.
+- **Residual on the discarded readings.** Besides the residual against the
+  retained measurements, every row records `*_residual_disc_rel`, the residual
+  on the readings the truncation discards, where a null-space error e_N appears
+  as A e_N.
+- **Local gains** are estimated by power iteration for five restrictions; `attack`
+  is ‖P_N J_g A^+‖ on range(U_k) times ‖P_k y^δ‖/‖x‖, the gain a null-space
+  attack sees to first order. Every estimate is a lower bound; `conv` records
+  the relative change of its last iteration.
 - **Targeted attacks are scored by the distance to their target** t, relative to
   ‖x_gt − t‖: 1 at the ground truth, 0 at the target (`tgt_*` columns), split
   into range and null-space part, plus the share of samples that end closer to

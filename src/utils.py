@@ -98,6 +98,20 @@ def to_4d(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
+def measurement_noise(g: torch.Tensor, y: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Noise of relative size sigma on every measured reading.
+
+    ``g`` is a standard normal draw on the measured readings (the unmeasured
+    rows zero, as radon.mask_la leaves them); it is rescaled per sample to
+    ||eta|| = sigma * ||y||. The draw does not depend on the truncation, so the
+    same g gives the same noise at every tau, and, rescaled, at every sigma. The
+    truncated pseudoinverse receives only P_k eta, about sqrt(k/m) of it."""
+    b = y.shape[0]
+    y_norm = torch.linalg.norm(y.reshape(b, -1), dim=1)
+    g_norm = torch.linalg.norm(g.reshape(b, -1), dim=1)
+    return (sigma * y_norm / g_norm).view(b, *([1] * (y.ndim - 1))) * g
+
+
 def mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """The training objective: plain MSE against the ground truth."""
     return torch.mean((pred - target) ** 2)

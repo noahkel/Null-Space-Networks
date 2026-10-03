@@ -13,25 +13,26 @@ phantoms:
                          that is best for a RESNET or NSN reconstruction, and
                          the two need not agree. This is the oracle choice for a
                          truncated SVD, with the noise drawn the way
-                         create_phantom_data draws it at that tau: through that
-                         tau's own range projector, rescaled to sigma*||y||.
+                         create_phantom_data draws it: on every measured
+                         reading, rescaled to sigma*||y||, the same draw at
+                         every tau.
   how much tau matters   how far dim N(A) moves with tau, and how much of the
                          reference null-space error another tau would count as
                          measured instead.
 
 It names candidates for a second run: the optimum at the run's noise level, and
-the taus closest to halving and to doubling dim N(A). It also restates the
-noise-scheme number of the thesis, the share of a noise draw in range(A) that
-survives into range(U_k).
+the taus closest to halving and to doubling dim N(A). It also reports, per tau,
+the share ||P_k eta|| / ||eta|| of the noise that reaches the reconstruction,
+about sqrt(k/m) for m measured readings; the attack budget is that share.
 
 Everything comes from one decomposition, the operator at tau = FULL_TAU. The
 truncations are nested, since a larger tau keeps a prefix of the singular
 directions. With the coefficients c_i = v_i^T x of a phantom and a_i = u_i^T g
-of a noise draw, the pseudoinverse keeping k directions has, exactly and
-orthogonally,
+of a noise draw g on the m measured readings, the pseudoinverse keeping k
+directions has, exactly and orthogonally,
 
     ||e_N||^2 = sum_{i>k} c_i^2   (+ any part of x outside range(A))
-    ||e_R||^2 = (sigma ||y||)^2 * sum_{i<=k} a_i^2 / s_i^2 / sum_{i<=k} a_i^2,
+    ||e_R||^2 = (sigma ||y||)^2 * sum_{i<=k} a_i^2 / s_i^2 / ||g||^2,
 
 so cumulative sums over i give every tau at once. One sample is recomputed with
 the pipeline's own projectors as a check on these formulas.
@@ -55,6 +56,7 @@ import numpy as np
 import torch
 
 from src.radon import MatrixRadonAdapter
+from src.utils import measurement_noise
 
 FULL_TAU = 1e-15
 REPORT_TAUS = (1e-4, 3e-4, 1e-3, 2e-3, 4e-3, 8e-3, 1.6e-2, 3.2e-2)
@@ -112,6 +114,7 @@ def coefficients(radon: MatrixRadonAdapter, phantoms: torch.Tensor,
       a2      (S, K)  a_i^2 = (u_i^T g)^2, g read on the measured rows as proj_ran reads it
       a2s2    (S, K)  a_i^2 / s_i^2
       x2, y2  (S,)    ||x||^2 and ||y||^2, with y = A x as forward_la computes it
+      g2      (S,)    ||g||^2 over the measured readings, the norm the noise is scaled by
     """
     n_s = phantoms.shape[0]
     x = phantoms.to(device=radon.device, dtype=radon.dtype)
@@ -127,7 +130,8 @@ def coefficients(radon: MatrixRadonAdapter, phantoms: torch.Tensor,
         return t.detach().cpu().numpy()
 
     return {"c2": cpu(c ** 2), "a2": cpu(a ** 2), "a2s2": cpu((a / s) ** 2),
-            "x2": cpu((x_flat ** 2).sum(1)), "y2": cpu((y ** 2).sum(1))}
+            "x2": cpu((x_flat ** 2).sum(1)), "y2": cpu((y ** 2).sum(1)),
+            "g2": cpu((g.double() ** 2).sum(1))}
 
 
 class Errors:
@@ -141,13 +145,18 @@ class Errors:
         self.C2 = np.concatenate([zero, np.cumsum(coef["a2"], 1)], 1)
         self.C3 = np.concatenate([zero, np.cumsum(coef["a2s2"], 1)], 1)
         self.y2 = coef["y2"] / dx ** 2
+        self.g2 = coef["g2"]
         self.x_norm = np.maximum(np.sqrt(coef["x2"]), 1e-3 * math.sqrt(n))
 
     def squared(self, ks, sigma: float) -> Tuple[np.ndarray, np.ndarray]:
         """||e_N||^2 and ||e_R||^2, both (S, len(ks))"""
         return (self.tail[:, ks],
-                (sigma ** 2 * self.y2)[:, None] * self.C3[:, ks]
-                / np.maximum(self.C2[:, ks], 1e-300))
+                (sigma ** 2 * self.y2 / np.maximum(self.g2, 1e-300))[:, None] * self.C3[:, ks])
+
+    def received(self, ks) -> np.ndarray:
+        """||P_k eta|| / ||eta||, the share of the noise the reconstruction
+        keeping k directions receives, (S, len(ks))."""
+        return np.sqrt(self.C2[:, ks] / np.maximum(self.g2, 1e-300)[:, None])
 
     def relative(self, ks, sigma: float) -> Tuple[np.ndarray, np.ndarray]:
         """The same two errors, each relative to ||x||."""
@@ -170,7 +179,7 @@ class Errors:
             null_k = self.tail[:, k]
             shell = null_ref - null_k
         else:
-            shell = (sigma ** 2 * self.y2 / np.maximum(self.C2[:, k_ref], 1e-300)
+            shell = (sigma ** 2 * self.y2 / np.maximum(self.g2, 1e-300)
                      * (self.C3[:, k_ref] - self.C3[:, k]))
             null_k = null_ref + shell
         ref = np.maximum(null_ref, 1e-300)
@@ -187,8 +196,7 @@ def cross_check(radon: MatrixRadonAdapter, phantom: torch.Tensor, noise: torch.T
     with truncated_to(radon, k) as r:
         x = phantom.to(device=r.device, dtype=r.dtype)
         y = r.forward_la(x)
-        eta = r.proj_ran(noise.to(device=r.device, dtype=r.dtype))
-        eta = sigma * (torch.linalg.norm(y) / torch.linalg.norm(eta)) * eta
+        eta = measurement_noise(r.mask_la(noise.to(device=r.device, dtype=r.dtype)), y, sigma)
         e_ran, e_nul = r.decompose_error(r.backward_la(y + eta) - x)
     direct = np.array([float((e_nul.double() ** 2).sum()), float((e_ran.double() ** 2).sum())])
     formula = np.array([null2, range2])
@@ -267,13 +275,15 @@ def run_study(radon: MatrixRadonAdapter, phantoms: torch.Tensor, noises: Sequenc
         if k == 0:
             continue
         row = {"tau": tau, "k": k, "dim_null": n - k, "s_min_rel": float(s[k - 1] / s[0]),
-               "cond": float(s[0] / s[k - 1]), "per_noise": {}}
+               "cond": float(s[0] / s[k - 1]),
+               "noise_received": float(err.received([k])[:, 0].mean()), "per_noise": {}}
         for sig in noises:
             row["per_noise"][f"{sig:g}"] = {**{m: v["mean"] for m, v in err.at(k, sig).items()},
                                             **err.reclassified(k_ref, k, sig)}
         table.append(row)
 
-    surviving = np.sqrt(err.C2[:, k_ref] / np.maximum(err.C2[:, n_k], 1e-300))
+    m = int(radon.n_la * radon.det_count)
+    received = err.received([k_ref])[:, 0]
     null2, range2 = (v[0, 0] for v in err.squared([k_ref], noises[0]))
     check = cross_check(radon, phantoms[:1], noise[:1], k_ref, noises[0],
                         float(null2), float(range2))
@@ -286,8 +296,10 @@ def run_study(radon: MatrixRadonAdapter, phantoms: torch.Tensor, noises: Sequenc
         "dims": {"n": n, "range_M": int(radon.n_la * radon.det_count), "range_A": n_k,
                  "k_ref": k_ref, "dim_null_ref": dim_ref},
         "sigma_max": float(s[0]),
-        "noise_scheme": {"surviving_fraction": _stats(surviving),
-                         "predicted": math.sqrt(k_ref / n_k)},
+        "noise_scheme": {"model": "measured_readings",
+                         "received_fraction": _stats(received),
+                         "predicted": math.sqrt(k_ref / m),
+                         "s_min_full_rel": float(s[-1] / s[0])},
         "optimal": optimal,
         "candidates": candidates,
         "recommended": recommended,
@@ -305,21 +317,23 @@ def print_report(res: Dict) -> None:
     print(f"  n = {d['n']}, measured rows = {d['range_M']}, rank(A) = {d['range_A']}"
           f" (tau = {FULL_TAU:g}), sigma_max = {res['sigma_max']:.4e}")
     print(f"  reference tau = {res['tau_ref']:g}: k = {d['k_ref']}, dim N(A) = {d['dim_null_ref']}")
-    print(f"  noise drawn in range(A) keeps {ns['surviving_fraction']['mean']:.3f}"
-          f" +/- {ns['surviving_fraction']['std']:.3f} of its size in range(U_k)"
-          f" (predicted {ns['predicted']:.3f})")
+    print(f"  the reconstruction receives {ns['received_fraction']['mean']:.3f}"
+          f" +/- {ns['received_fraction']['std']:.3f} of the noise, ||P_k eta|| / ||eta||"
+          f" (sqrt(k/m) = {ns['predicted']:.3f}); smallest singular value of A_la:"
+          f" {ns['s_min_full_rel']:.2e} s_max")
     print(f"  error formulas against the pipeline's projectors: "
           f"{res['cross_check']['rel_diff']:.1e} relative")
 
     print("\n--- pseudoinverse error by tau (means; e_N, e_R relative to ||x||) ----")
-    print(f"  {'tau':>8} {'k':>6} {'dim N':>6} {'cond':>6}"
+    print(f"  {'tau':>8} {'k':>6} {'dim N':>6} {'cond':>6} {'recv':>5}"
           + "".join(f" | {'sigma=' + key:>20}" for key in keys))
-    print(f"  {'':>29}" + "".join(f" | {'rel-L2':>6} {'e_N':>6} {'e_R':>6}" for _ in keys))
+    print(f"  {'':>35}" + "".join(f" | {'rel-L2':>6} {'e_N':>6} {'e_R':>6}" for _ in keys))
     for row in res["table"]:
         cells = "".join(f" | {row['per_noise'][key]['rel_l2']:6.3f} {row['per_noise'][key]['e_null']:6.3f}"
                         f" {row['per_noise'][key]['e_range']:6.3f}" for key in keys)
         mark = "  <- reference" if math.isclose(row["tau"], res["tau_ref"]) else ""
-        print(f"  {row['tau']:>8g} {row['k']:>6} {row['dim_null']:>6} {row['cond']:>6.0f}{cells}{mark}")
+        print(f"  {row['tau']:>8g} {row['k']:>6} {row['dim_null']:>6} {row['cond']:>6.0f}"
+              f" {row['noise_received']:>5.3f}{cells}{mark}")
 
     run_key = f"{res['run_noise']:g}"
     print(f"\n--- the reference null-space error from another tau (sigma={run_key}) --")

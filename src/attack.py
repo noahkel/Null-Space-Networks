@@ -122,12 +122,22 @@ def project_delta(delta: torch.Tensor, eps: Budget,
     """Projection onto the feasible set S = range(U_k) ∩ {||δ||_2 ≤ ε}."""
     return projector(proj_l2_ball(projector(delta), eps))
 
-def suite_eps_batch(y_clean: torch.Tensor, eps_nominal: float) -> torch.Tensor:
-    """Per-sample budget eps_i for one batch.
+def received_noise(radon, x_gt: torch.Tensor, y_clean: torch.Tensor) -> torch.Tensor:
+    """P_k eta = P_k y^delta - P_k A x_gt, per sample: the part of the
+    measurement noise that reaches the reconstruction (y_clean is P_k y^delta)."""
+    return y_clean - radon.proj_ran(radon.forward_la(x_gt))
 
-    eps_i = eps_nominal * ||y_i||_2 — per sample, so a bright and a faint
-    sinogram are attacked at the same *relative* strength."""
-    return eps_nominal * l2_norm_batch(y_clean)
+
+def noise_budget_batch(radon, x_gt: torch.Tensor, y_clean: torch.Tensor,
+                       factor: float = 1.0) -> torch.Tensor:
+    """Per-sample budget eps_i = factor * ||P_k eta_i||.
+
+    The noise is drawn on every measured reading, and the reconstruction
+    receives only its component in range(U_k). An attacker confined to
+    range(U_k) is therefore granted exactly that component's norm, per sample:
+    at factor 1 the perturbation is as large as the noise the reconstruction
+    actually sees, in the subspace in which it sees it."""
+    return factor * l2_norm_batch(received_noise(radon, x_gt, y_clean))
 
 def suite_step_size(eps: Budget, steps: int = SUITE_STEPS) -> Budget:
     """PGD step alpha: the classic 2.5*eps/steps, in the same units as the
@@ -143,12 +153,22 @@ def reduce_loss(loss_map: torch.Tensor) -> torch.Tensor:
         return loss_map.mean()
     return per_sample_loss(loss_map).mean()
 
+def random_perturbation(y_clean: torch.Tensor, eps: Budget,
+                        projector: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
+    """A random direction of range(P), scaled to the full budget eps_i: the
+    baseline the attacks are compared with. At budget factor 1 it is a second,
+    independent noise draw of the size the reconstruction already receives."""
+    d = projector(torch.randn_like(y_clean))
+    d = d / l2_norm_batch(d).clamp_min(1e-12).view(-1, 1, 1, 1)
+    return d * as_eps_batch(eps, y_clean)
+
 def random_start(y_clean: torch.Tensor, eps: Budget,
                  projector: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
     """A random point of S = range(P) ∩ B_eps, per sample.
 
     The direction is a projected Gaussian, which is isotropic within range(P),
-    normalised to unit length; the radius is uniform on [0, eps_i]. Drawing the
+    normalised to unit length; the radius is uniform on [0, eps_i] (so the
+    point is not uniform on the ball, which would need eps_i * U^(1/k)). Drawing the
     Gaussian and merely clipping it to the ball instead would start every sample
     at radius min(||g||, eps) -- a number set by the sinogram dimension, not by
     the budget -- so all restarts would begin on the same sphere."""
@@ -303,11 +323,10 @@ def pgd_attack(
 
         delta <- Pi_S( delta + alpha * normalize(grad_delta loss) )
 
-    started from a random point of S (see random_start). Of the restarts, the
-    best one is kept *per sample*: a batch-level choice would hand every sample
-    the restart that is best on average, which is weaker for any sample whose
-    own best came from another restart, and would understate how attackable the
-    model is.
+    started from a random point of S (see random_start). Fixed-step PGD is not
+    monotone, so every iterate is scored and each sample keeps the best one it
+    reached, over all steps and restarts, rather than the last: a batch-level
+    or last-iterate choice would understate how attackable the model is.
 
     ``objective`` is maximised; see attack_objective. ``target`` supplies the
     reference image for the targeted 'target' objective and is ignored by the
@@ -324,27 +343,98 @@ def pgd_attack(
         return attack_objective(pred, x_gt, objective, radon=radon, target=target,
                                 reduction=reduction)
 
+    def keep_best(score: torch.Tensor, delta: torch.Tensor) -> None:
+        nonlocal best_score, best_delta
+        better = score > best_score
+        best_score = torch.where(better, score, best_score)
+        best_delta = torch.where(better.view(-1, 1, 1, 1), delta, best_delta)
+
     for _ in range(SUITE_RESTARTS):
         delta = random_start(y_clean, eps, adapter.projector)
 
         for _ in range(SUITE_STEPS):
             y_adv = (y_clean + delta).detach().requires_grad_(True)
             pred, _, _ = adapter.forward(y_adv, project=False)
-            grad = torch.autograd.grad(loss_of(pred), y_adv)[0]
+            score = loss_of(pred, reduction="none")
+            # the batch mean of the per-sample scores is the "mean" reduction
+            grad = torch.autograd.grad(score.mean(), y_adv)[0]
             with torch.no_grad():
+                keep_best(score.detach(), delta)
                 g = grad / l2_norm_batch(grad).clamp_min(1e-12).view(-1, 1, 1, 1)
                 delta = project_delta(delta + alpha_b * g, eps, adapter.projector)
 
         with torch.no_grad():
             pred, _, _ = adapter.forward(y_clean + delta, project=False)
-            score = loss_of(pred, reduction="none")
-            better = score > best_score
-            best_score = torch.where(better, score, best_score)
-            best_delta = torch.where(better.view(-1, 1, 1, 1), delta, best_delta)
+            keep_best(loss_of(pred, reduction="none"), delta)
 
     best_delta = best_delta.detach()
     return AttackResult(y_adv=(y_clean + best_delta).detach(), delta=best_delta,
                         runtime_sec=time.perf_counter() - start)
+
+def max_quadratic_on_ball(b: np.ndarray, d: np.ndarray, r: float,
+                          iters: int = 200) -> Tuple[float, np.ndarray]:
+    """Global maximum of f(c) = sum_i d_i (b_i + c_i)^2 over ||c|| <= r, d_i > 0.
+
+    A trust-region subproblem (Moré & Sorensen 1983). f is convex, so the
+    maximum lies on the sphere, and c is a global maximiser exactly when
+    (mu I - D) c = D b with mu >= max d and ||c|| = r. On (max d, inf) the norm
+    of c(mu) = D b / (mu - d) falls strictly from infinity to zero, so mu is
+    found by bisection on t = mu - max d. In the hard case, D b vanishing on the
+    directions of max d, the norm stays bounded as t -> 0 and the remaining
+    length is spent along such a direction. Returns (max f, c)."""
+    b = np.asarray(b, dtype=np.float64)
+    d = np.asarray(d, dtype=np.float64)
+    if r <= 0:
+        return float(np.sum(d * b * b)), np.zeros_like(b)
+    d_max = float(d.max())
+    top = d >= d_max * (1.0 - 1e-12)
+    db = d * b
+    gap = d_max - d
+
+    def c_of(t: float) -> np.ndarray:
+        return db / (gap + t)
+
+    hi = float(np.linalg.norm(db)) / r          # ||c(hi)|| <= ||D b|| / hi = r
+    lo = float(np.linalg.norm(db[top])) / r     # ||c(lo)|| >= ||D b on top|| / lo = r
+    if lo > 0.0:
+        for _ in range(iters):
+            mid = math.sqrt(lo * hi)
+            if np.linalg.norm(c_of(mid)) > r:
+                lo = mid
+            else:
+                hi = mid
+        c = c_of(hi)
+    else:                                       # hard case
+        c = np.zeros_like(b)
+        c[~top] = db[~top] / gap[~top]
+        rest = r * r - float(c @ c)
+        if rest > 0:
+            j = int(np.flatnonzero(top)[0])
+            c[j] = math.sqrt(rest)
+    return float(np.sum(d * (b + c) ** 2)), c
+
+
+def range_growth_certificate(radon, x_gt: torch.Tensor, y_clean: torch.Tensor,
+                             budget: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+    """The exact clean and worst-case range error of the Nullspace Network, per
+    sample.
+
+    Its range error is A^+(P_k eta + delta), whatever the weights. In the
+    coordinates b = U_k^T eta and c = U_k^T delta the range attack maximises
+    sum_i (b_i + c_i)^2 / s_i^2 over ||c|| <= eps_i, a trust-region subproblem
+    solved exactly by max_quadratic_on_ball. Returns (||A^+ eta||, max over the
+    feasible set of ||A^+(eta + delta)||), both absolute and in float64; any
+    attack on the NSN reaches at most the second."""
+    eta = received_noise(radon, x_gt, y_clean)
+    la = radon._la_mask()
+    e = eta[..., la, :].reshape(eta.shape[0], -1).to(device=radon.device, dtype=radon.dtype)
+    b = (e @ radon._U_k_la).double().cpu().numpy() / radon.dx
+    d = 1.0 / radon._s_k_la.double().cpu().numpy() ** 2
+    r = budget.detach().double().cpu().numpy().reshape(-1) / radon.dx
+    clean = np.sqrt(np.sum(d * b * b, axis=1))
+    worst = np.array([math.sqrt(max_quadratic_on_ball(b[i], d, float(r[i]))[0])
+                      for i in range(b.shape[0])])
+    return clean, worst
 
 # --------------------------------------------------------------------------- #
 # Data / model setup.
@@ -455,12 +545,21 @@ def evaluate_batch(
     success_mse_factor: float,
     radon=None,
     target: Optional[torch.Tensor] = None,
+    y_meas: Optional[torch.Tensor] = None,
+    budget: Optional[torch.Tensor] = None,
+    certificate: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> List[Dict[str, float]]:
     """Per-sample metrics for one batch: clean and adversarial reconstruction
     quality, the size of the perturbation, and the range/null decomposition of
     both error fields (when a radon operator is supplied). For a targeted attack
     ``target`` is its target image per sample, and the distance to it is scored
-    as well (target_distance_metrics)."""
+    as well (target_distance_metrics).
+
+    ``y_meas`` is the noisy sinogram on all measured readings, before the
+    projection onto range(U_k); with it the residual is also scored on the
+    readings the truncation discards, where a null-space error e_N shows up as
+    A e_N. ``budget`` is the per-sample L2 budget, and ``certificate`` the
+    exact clean and worst-case range error of range_growth_certificate."""
     rows: List[Dict[str, float]] = []
     batch_size = x_gt.shape[0]
 
@@ -634,6 +733,37 @@ def evaluate_batch(
                 "adv_init_e_nul_frac": adv_ie_nul_l2 / max(adv_ie_l2, 1e-12),
             })
 
+        if budget is not None:
+            row["budget_l2"] = float(budget.reshape(-1)[i])
+        if certificate is not None:
+            row["cert_e_ran_clean"] = float(certificate[0][i])
+            row["cert_e_ran_max"] = float(certificate[1][i])
+
+        if radon is not None and y_meas is not None:
+            # The unprojected residual. Against all measured readings the
+            # ground truth leaves the noise, ||eta||; on the discarded readings
+            # (I - P_k), where delta has no component, any reconstruction
+            # leaves (I - P_k)(A e) - (I - P_k) eta = A e_N - (I - P_k) eta,
+            # since (I - P_k) A = A P_N. A null-space hallucination is visible
+            # there although P_k A x_hat matches the data exactly.
+            with torch.no_grad():
+                s = slice(i, i + 1)
+                y_i = y_meas[s]
+                den = max(float(torch.linalg.norm(y_i.reshape(-1))), 1e-12)
+
+                def _resid(pred_t, extra):
+                    r_full = radon.forward_la(pred_t) - y_i - extra
+                    r_disc = r_full - radon.proj_ran(r_full)
+                    return (float(torch.linalg.norm(r_full.reshape(-1))) / den,
+                            float(torch.linalg.norm(r_disc.reshape(-1))) / den)
+
+                zero = torch.zeros_like(y_i)
+                row["gt_residual_full_rel"], row["gt_residual_disc_rel"] = _resid(x_gt[s], zero)
+                row["clean_residual_full_rel"], row["clean_residual_disc_rel"] = _resid(
+                    clean_pred[s], zero)
+                row["adv_residual_full_rel"], row["adv_residual_disc_rel"] = _resid(
+                    adv_pred[s], delta[s])
+
         if target is not None:
             s = slice(i, i + 1)
             row.update(target_distance_metrics(
@@ -706,6 +836,10 @@ def summarize_metrics(rows: List[Dict[str, float]]) -> Dict[str, float]:
         "adv_init_e_ran_l2", "adv_init_e_nul_l2",
         "adv_init_e_ran_frac", "adv_init_e_nul_frac",
         "clean_consistency_rel", "adv_consistency_rel", "adv_consistency_vs_clean_rel",
+        "gt_residual_full_rel", "gt_residual_disc_rel",
+        "clean_residual_full_rel", "clean_residual_disc_rel",
+        "adv_residual_full_rel", "adv_residual_disc_rel",
+        "budget_l2", "cert_e_ran_clean", "cert_e_ran_max",
     ]
     # Per-metric range/null decomposition emitted by evaluate_batch: clean/adv ×
     # range/null × {rel_l2,psnr,ssim,mae,nrmse,max_err}. Aggregated like everything
@@ -743,9 +877,12 @@ def summarize_metrics(rows: List[Dict[str, float]]) -> Dict[str, float]:
 # which is the plain local Lipschitz constant of the learned correction.
 # "cross" takes the input from N(A_la)^perp and the output in N(A_la): the gain
 # from the measured part of the input into the unmeasured part of the output,
-# which is the one a null-space attack exploits, since x_init = A^+ y always
-# lies in N(A_la)^perp.
-LIPSCHITZ_RESTRICTIONS = ("null", "range", "full", "cross")
+# since x_init = A^+ y always lies in N(A_la)^perp. "attack" goes one step
+# further back, to the measurement: the gain of P_N J_g A^+ on range(U_k), the
+# map a null-space attack sees to first order, made dimensionless by
+# ||P_k y^delta|| / ||x_gt|| (relative null-space error per relative
+# perturbation).
+LIPSCHITZ_RESTRICTIONS = ("null", "range", "full", "cross", "attack")
 
 
 def image_projector(radon, restriction: str) -> Callable[[torch.Tensor], torch.Tensor]:
@@ -769,9 +906,12 @@ def image_projector(radon, restriction: str) -> Callable[[torch.Tensor], torch.T
 
 def restriction_projectors(radon, restriction: str) -> Tuple[
         Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
-    """(input projector, output projector) for any of ``LIPSCHITZ_RESTRICTIONS``."""
+    """(input projector, output projector) for any of ``LIPSCHITZ_RESTRICTIONS``.
+    For "attack" the input projector acts on sinograms (P_k)."""
     if restriction == "cross":
         return image_projector(radon, "range"), image_projector(radon, "null")
+    if restriction == "attack":
+        return radon.proj_ran, image_projector(radon, "null")
     if restriction not in LIPSCHITZ_RESTRICTIONS:
         raise ValueError(f"unknown Lipschitz restriction {restriction!r}, "
                          f"expected one of {LIPSCHITZ_RESTRICTIONS}")
@@ -798,6 +938,7 @@ def estimate_lipschitz(
     n_iters: int,
     proj: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     out_proj: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    through_pinv: bool = False,
 ) -> Dict[str, float]:
     """Operator-norm (local Lipschitz) estimate of the *learned correction*,
     restricted to whichever subspace ``proj`` projects onto.
@@ -826,25 +967,48 @@ def estimate_lipschitz(
     first two elements. ``n_samples`` clean reconstructions are linearised and
     ``n_iters`` power iterations are run at each. The per-point estimates are
     returned under ``values`` as well, in the order of the cache.
+
+    Every power-iteration estimate is a lower bound on the norm, and the
+    sequence is nondecreasing; ``conv`` holds, per point, the relative increase
+    of the last iteration, so a small value says the bound has settled.
+
+    With ``through_pinv`` the map is linearised at the measurement instead:
+    y -> out_proj(g(A^+ y)) at y0 = P_k y^delta (the third cache entry), the
+    input restricted by ``proj`` (P_k), and the result scaled by
+    ||y0|| / ||x_gt||.
     """
     proj = radon.proj_null_image if proj is None else proj
     out_proj = proj if out_proj is None else out_proj
     samples: List[float] = []
+    conv: List[float] = []
 
+    def G_image(x: torch.Tensor) -> torch.Tensor:
+        # learned correction, output restricted to the chosen subspace
+        return out_proj(model(x) - x)
+
+    def G_sino(y: torch.Tensor) -> torch.Tensor:
+        x = radon.backward_la(y)
+        return out_proj(model(x) - x)
+
+    G = G_sino if through_pinv else G_image
     for entry in clean_cache:
-        x_init = entry[1]
-        for b in range(x_init.shape[0]):
+        points = entry[2] if through_pinv else entry[1]
+        for b in range(points.shape[0]):
             if len(samples) >= n_samples:
                 break
-            x0 = x_init[b: b + 1].detach()
-
-            def G(x: torch.Tensor) -> torch.Tensor:
-                # learned correction, output restricted to the chosen subspace
-                return out_proj(model(x) - x)
+            x0 = points[b: b + 1].detach()
+            scale = 1.0
+            if through_pinv:
+                x_gt = entry[0][b: b + 1]
+                scale = (float(torch.linalg.norm(x0.reshape(-1)))
+                         / max(float(torch.linalg.norm(x_gt.reshape(-1))),
+                               1e-3 * math.sqrt(x_gt.numel())))
             d = proj(torch.randn_like(x0))
             d = d / (torch.linalg.norm(d.reshape(-1)) + 1e-12)
+            prev = 0.0
             for _ in range(n_iters):
                 _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
+                prev = float(torch.linalg.norm(u.reshape(-1)))
                 _, w = torch.autograd.functional.vjp(G, x0, out_proj(u), strict=False)
                 w = proj(w)
                 nw = torch.linalg.norm(w.reshape(-1))
@@ -852,19 +1016,25 @@ def estimate_lipschitz(
                     break
                 d = w / nw
             _, u = torch.autograd.functional.jvp(G, x0, d, strict=False)
-            samples.append(float(torch.linalg.norm(out_proj(u).reshape(-1)).item()))
+            sigma = float(torch.linalg.norm(out_proj(u).reshape(-1)).item())
+            samples.append(scale * sigma)
+            conv.append(abs(sigma - prev) / max(sigma, 1e-30))
         if len(samples) >= n_samples:
             break
 
     if not samples:
         return {"mean": float("nan"), "max": float("nan"), "std": float("nan"), "n": 0,
-                "values": []}
+                "values": [], "conv": []}
     return {
         "mean": float(np.mean(samples)),
+        "median": float(np.median(samples)),
         "max": float(np.max(samples)),
         "std": float(np.std(samples)),
         "n": len(samples),
         "values": samples,
+        # relative increase of the last power iteration, per point
+        "conv": conv,
+        "conv_max": float(np.max(conv)),
     }
 
 
@@ -892,9 +1062,11 @@ _SUITE_OBJECTIVE = {
     "adversarial_range": "range",         # null-space complement = range (measured) error
     "adversarial_target_zero": "zero",    # targeted: drive the prediction to 0 (zero sinogram)
     "adversarial_target_sample": "target",  # targeted: drive toward another sample's GT
+    "random_baseline": "random",          # no attack: a random direction at the full budget
 }
 _SUITE_ATTACKS = ["adversarial", "adversarial_null", "adversarial_range",
-                  "adversarial_target_zero", "adversarial_target_sample"]
+                  "adversarial_target_zero", "adversarial_target_sample",
+                  "random_baseline"]
 
 # Suite attacks that need a per-batch target image threaded into the attack.
 _SUITE_TARGETED_ATTACKS = {"adversarial_target_sample"}
@@ -976,6 +1148,9 @@ def prepare_run(args) -> RunSetup:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     summary = load_summary(args.data_root)
     noise_rel = float(summary.get("noise_sigma_rel") or 0.0)
+    if summary.get("noise_model") != "measured_readings":
+        print(f"[warn] {args.data_root} was made with the earlier noise model, the "
+              f"noise confined to range(U_k); regenerate it with src.create_phantom_data")
     if not (Path(args.data_root) / INIT_NAME).is_dir():
         raise FileNotFoundError(
             f"No '{INIT_NAME}' init-reconstruction folder found in {args.data_root}.")
@@ -1002,8 +1177,10 @@ def build_init_inputs(args, radon, max_samples: int, device):
     return proj, build_input_cache(proj, loader, max_samples, device)
 
 def build_input_cache(projector, loader, max_samples: int, device) -> List[Tuple]:
-    """Cache the model-independent (x_gt, x_init, y_clean) inputs once so every
-    model in the suite is attacked and evaluated on identical data."""
+    """Cache the model-independent (x_gt, x_init, y_clean, y_meas) inputs once so
+    every model in the suite is attacked and evaluated on identical data.
+    y_clean = P_k y^delta is what is attacked; y_meas = y^delta, on every
+    measured reading, is kept for the residual on the discarded readings."""
     cache: List[Tuple] = []
     n = 0
     with torch.no_grad():
@@ -1012,7 +1189,7 @@ def build_input_cache(projector, loader, max_samples: int, device) -> List[Tuple
             x_init = to_4d(x_init).to(device)
             y_delta = to_4d(y_delta).to(device)
             y_clean = projector(y_delta)
-            cache.append((x_gt, x_init, y_clean))
+            cache.append((x_gt, x_init, y_clean, y_delta))
             n += x_gt.shape[0]
             if n >= max_samples:
                 break
@@ -1087,7 +1264,7 @@ def _stack_chunks(chunks: List[torch.Tensor]) -> np.ndarray:
     return torch.cat(chunks, dim=0)[:, 0].numpy()
 
 def run_suite(args, radon, summary: Dict,
-              noise_rel: float, eps_nominal: float,
+              noise_rel: float, budget_factor: float,
               attacks_root: Path) -> bool:
     """Run the five-attack suite and write every artifact to disk. Returns False
     (and skips) when no model checkpoints exist.
@@ -1143,22 +1320,30 @@ def run_suite(args, radon, summary: Dict,
             yadv_chunks: List[torch.Tensor] = []
             processed = 0
 
-            for bi, (x_gt, clean_init, y_clean) in enumerate(input_cache):
+            for bi, (x_gt, clean_init, y_clean, y_meas) in enumerate(input_cache):
                 with torch.no_grad():
                     clean_pred = model(clean_init)
-                eps_batch = suite_eps_batch(y_clean, eps_nominal)
+                    eps_batch = noise_budget_batch(radon, x_gt, y_clean, budget_factor)
+                    # model-independent, so the same for every attack and model
+                    certificate = range_growth_certificate(radon, x_gt, y_clean, eps_batch)
 
                 # Targeted attacks steer the recon toward a fixed reference:
                 # 'zero' targets the zero image internally, while 'target' needs
                 # the per-batch reference, a random *other* sample's ground
                 # truth. Both are scored by the distance to their target.
                 target = targets[bi]
-                result = pgd_attack(
-                    adapter=adapter, x_gt=x_gt, y_clean=y_clean,
-                    clean_pred=clean_pred, eps=eps_batch,
-                    alpha=suite_step_size(eps_batch),
-                    objective=objective,
-                    target=target if attack_name in _SUITE_TARGETED_ATTACKS else None)
+                if objective == "random":
+                    with torch.no_grad():
+                        delta_rand = random_perturbation(y_clean, eps_batch, adapter.projector)
+                    result = AttackResult(y_adv=y_clean + delta_rand, delta=delta_rand,
+                                          runtime_sec=0.0)
+                else:
+                    result = pgd_attack(
+                        adapter=adapter, x_gt=x_gt, y_clean=y_clean,
+                        clean_pred=clean_pred, eps=eps_batch,
+                        alpha=suite_step_size(eps_batch),
+                        objective=objective,
+                        target=target if attack_name in _SUITE_TARGETED_ATTACKS else None)
                 with torch.no_grad():
                     adv_pred, adv_init, y_adv = adapter.forward(result.y_adv)
                 delta = result.delta
@@ -1173,7 +1358,8 @@ def run_suite(args, radon, summary: Dict,
                     x_gt=x_gt, clean_init=clean_init, clean_y=y_clean, clean_pred=clean_pred,
                     adv_init=adv_init, adv_y=y_adv, adv_pred=adv_pred, delta=delta,
                     success_mse_factor=SUCCESS_MSE_FACTOR, radon=radon,
-                    target=target,
+                    target=target, y_meas=y_meas, budget=eps_batch,
+                    certificate=certificate,
                 ))
 
                 # One example-image dict for sample j, shared by the first-K
@@ -1213,7 +1399,8 @@ def run_suite(args, radon, summary: Dict,
 
             metrics = summarize_metrics(rows)
             metrics.update({"model_name": model_name, "attack_name": attack_name,
-                            "objective": objective, "eps": eps_nominal})
+                            "objective": objective, "eps": budget_factor,
+                            "budget_factor": budget_factor})
             summary_by_model[model_name] = metrics
 
             model_out = attack_dir / model_name
@@ -1246,7 +1433,9 @@ def run_suite(args, radon, summary: Dict,
                   f"e_ran(med)={metrics.get('adv_e_ran_l2_median', float('nan')):.4f}")
 
         with open(attack_dir / "summary.json", "w", encoding="utf-8") as f:
-            json.dump({"attack": attack_name, "objective": objective, "eps": eps_nominal,
+            # "eps" is the budget factor kappa: eps_i = kappa * ||P_k eta_i||
+            json.dump({"attack": attack_name, "objective": objective, "eps": budget_factor,
+                       "budget_factor": budget_factor, "budget": "factor * ||P_k eta||",
                        "noise_sigma_rel": noise_rel, "models": summary_by_model}, f, indent=2)
 
         # The aggregate figures (scatter / bars / consistency) and the per-attack
@@ -1256,7 +1445,7 @@ def run_suite(args, radon, summary: Dict,
         # without the models.
         if not input_cache:
             continue
-        x_gt0, clean_init0, y_clean0 = input_cache[0]
+        x_gt0, clean_init0, y_clean0 = input_cache[0][:3]
         B0 = x_gt0.shape[0]
         T = min(SUITE_TRANSFER_SAMPLES, B0)
         n_ex = min(SUITE_EXAMPLES, B0)
@@ -1287,7 +1476,7 @@ def run_suite(args, radon, summary: Dict,
         write_transfer_bundle(
             attack_dir / "transfer.npz", attack_dir / "transfer.json",
             model_names=model_names, attack_name=attack_name,
-            eps=eps_nominal, T=T, n_ex=n_ex, gt_stack=gt_stack, recon=recon)
+            eps=budget_factor, T=T, n_ex=n_ex, gt_stack=gt_stack, recon=recon)
 
 
     write_lipschitz(args, models, input_cache, radon, out_root)
@@ -1319,10 +1508,12 @@ def write_lipschitz(args, models: Dict[str, nn.Module], input_cache: List[Tuple]
             r = estimate_lipschitz(
                 model=model, clean_cache=input_cache, radon=radon,
                 n_samples=args.lipschitz_samples, n_iters=args.lipschitz_iters,
-                proj=in_proj, out_proj=out_proj)
+                proj=in_proj, out_proj=out_proj,
+                through_pinv=(restriction == "attack"))
             entry[restriction] = r
             print(f"[suite][lipschitz] {name} [{restriction}] mean={r['mean']:.4g} "
-                  f"max={r['max']:.4g} (n={r['n']})")
+                  f"max={r['max']:.4g} (n={r['n']}, last-step change <= "
+                  f"{r.get('conv_max', float('nan')):.1e})")
     if lip_res:
         # Plotted later by visualise.render_tree from this json.
         with open(path, "w", encoding="utf-8") as f:
@@ -1352,6 +1543,7 @@ _AGGREGATE_METRICS = [
     "adv_rmse", "adv_mae", "mse_ratio",
     "adv_e_nul_l2", "adv_e_ran_l2", "adv_e_nul_frac",
     "clean_consistency_rel", "adv_consistency_rel", "adv_consistency_vs_clean_rel",
+    "clean_residual_disc_rel", "adv_residual_disc_rel",
     "delta_rel_l2", "success_mse",
     # targeted attacks only; NaN for the others
     "tgt_dist_clean", "tgt_dist_adv", "tgt_closed", "tgt_success",
@@ -1470,16 +1662,15 @@ def load_epoch_history(model_dir: Optional[str],
 _EPOCH_OBJECTIVES = {"mse", "null", "range", "zero"}
 
 
-def resolve_epoch_eps(epoch_eps: Optional[float], noise_rel: float) -> float:
-    """The budget of the epoch study: ``epoch_eps`` when given, otherwise the
-    training noise level, the budget of the attack suite. With the suite's
-    budget the last snapshot of each curve is attacked as the suite attacks the
-    best checkpoint, at every noise level alike."""
-    eps = epoch_eps if epoch_eps is not None else noise_rel
-    if not eps or eps <= 0:
-        raise ValueError("the epoch study needs noise_sigma_rel in summary.json, "
-                         "or pass --epoch-eps explicitly.")
-    return float(eps)
+def resolve_budget_factor(factor: Optional[float]) -> float:
+    """The budget factor kappa of eps_i = kappa * ||P_k eta_i||, 1 by default:
+    the attacker gets the noise the reconstruction receives. The epoch study
+    uses the suite's, so the last snapshot of each curve is attacked as the
+    suite attacks a trained model."""
+    kappa = 1.0 if factor is None else float(factor)
+    if not kappa > 0:
+        raise ValueError(f"the budget factor must be positive, got {factor!r}")
+    return kappa
 
 
 def epoch_study_csv_name(model_name: str, objective: str = "mse") -> str:
@@ -1504,7 +1695,7 @@ def run_epoch_study(args) -> None:
     device, radon = setup.device, setup.radon
     out_root = setup.out_root
 
-    eps_nominal = resolve_epoch_eps(getattr(args, "epoch_eps", None), setup.noise_rel)
+    budget_factor = resolve_budget_factor(getattr(args, "budget_factor", None))
     objective = getattr(args, "epoch_objective", "mse")
     if objective not in _EPOCH_OBJECTIVES:
         raise ValueError(f"--epoch-objective {objective!r}, expected one of "
@@ -1536,7 +1727,7 @@ def run_epoch_study(args) -> None:
             continue
         hist, best_epoch = load_epoch_history(args.model_dir, model_name)
         print(f"\n[epoch-study] model '{model_name}': {len(ckpts)} epochs, "
-              f"objective={objective}, eps={eps_nominal:g}")
+              f"objective={objective}, budget={budget_factor:g}*||P_k eta||")
         rows_out: List[Dict[str, float]] = []
         for epoch, ckpt_path in ckpts:
             model = build_models([model_name], radon=radon)[model_name].to(device)
@@ -1548,10 +1739,10 @@ def run_epoch_study(args) -> None:
             set_seed(stage_seed("epoch", objective))
             rows: List[Dict[str, float]] = []
             processed = 0
-            for x_gt, clean_init, y_clean in input_cache:
+            for x_gt, clean_init, y_clean, _ in input_cache:
                 with torch.no_grad():
                     clean_pred = model(clean_init)
-                eps_batch = suite_eps_batch(y_clean, eps_nominal)
+                    eps_batch = noise_budget_batch(radon, x_gt, y_clean, budget_factor)
                 result = pgd_attack(
                     adapter=adapter, x_gt=x_gt, y_clean=y_clean,
                     clean_pred=clean_pred, eps=eps_batch,
@@ -1571,7 +1762,7 @@ def run_epoch_study(args) -> None:
             rows_out.append({
                 "epoch": epoch, "train_loss": tr, "val_loss": va,
                 "is_best": int(best_epoch is not None and epoch == best_epoch),
-                "eps": eps_nominal,
+                "eps": budget_factor,
                 "clean_rel_l2_median": m.get("clean_rel_l2_median", float("nan")),
                 "adv_rel_l2_mean": m.get("adv_rel_l2_mean", float("nan")),
                 "adv_rel_l2_median": m.get("adv_rel_l2_median", float("nan")),
@@ -1601,6 +1792,77 @@ def run_epoch_study(args) -> None:
     print(f"\n[epoch-study] done -> {study_dir}")
     print(f"[epoch-study] render curves with:  python visualise.py {out_root}")
 
+BUDGET_SWEEP_CSV = "budget_sweep.csv"
+
+
+def parse_budget_factors(spec: str) -> List[float]:
+    """'0.25,0.5,1' -> [0.25, 0.5, 1.0], sorted, positive and without duplicates."""
+    factors = sorted({float(t) for t in spec.split(",") if t.strip()})
+    if not factors or any(not f > 0 for f in factors):
+        raise ValueError(f"budget factors must be positive, got {spec!r}")
+    return factors
+
+
+def run_budget_sweep(args) -> None:
+    """The null-space attack at several budgets, kappa * ||P_k eta_i|| for every
+    kappa of ``--budget-sweep``, on both models and the shared input cache.
+
+    Writes budget_sweep.csv in long form, one row per (kappa, model, sample),
+    so that medians and paired differences can be taken afterwards. Every
+    (kappa, model) reseeds from kappa alone, so both models start from the
+    same random points."""
+    setup = prepare_run(args)
+    device, radon = setup.device, setup.radon
+    factors = parse_budget_factors(args.budget_sweep)
+    projector, input_cache = build_init_inputs(args, radon, args.max_samples, device)
+    model_names = detect_suite_models(args.model_dir)
+    if not model_names:
+        raise FileNotFoundError(f"No checkpoints found under model-dir '{args.model_dir}'.")
+    out_rows: List[Dict[str, float]] = []
+    for name in model_names:
+        model = load_model_checkpoint(model_name=name, radon=radon, device=device,
+                                      model_dir=args.model_dir)
+        adapter = ModelAttackAdapter(model=model, radon=radon, projector=projector)
+        for kappa in factors:
+            set_seed(stage_seed("sweep", f"{kappa:g}"))
+            index = 0
+            for x_gt, clean_init, y_clean, _ in input_cache:
+                with torch.no_grad():
+                    clean_pred = model(clean_init)
+                    eps_batch = noise_budget_batch(radon, x_gt, y_clean, kappa)
+                result = pgd_attack(adapter=adapter, x_gt=x_gt, y_clean=y_clean,
+                                    clean_pred=clean_pred, eps=eps_batch,
+                                    alpha=suite_step_size(eps_batch), objective="null")
+                with torch.no_grad():
+                    adv_pred, adv_init, y_adv = adapter.forward(result.y_adv)
+                rows = evaluate_batch(
+                    x_gt=x_gt, clean_init=clean_init, clean_y=y_clean, clean_pred=clean_pred,
+                    adv_init=adv_init, adv_y=y_adv, adv_pred=adv_pred, delta=result.delta,
+                    success_mse_factor=SUCCESS_MSE_FACTOR, radon=radon)
+                for row in rows:
+                    out_rows.append({
+                        "budget_factor": kappa, "model": name, "sample": index,
+                        "clean_rel_l2_nul": row["clean_rel_l2_nul"],
+                        "adv_rel_l2_nul": row["adv_rel_l2_nul"],
+                        "clean_rel_l2_ran": row["clean_rel_l2_ran"],
+                        "adv_rel_l2_ran": row["adv_rel_l2_ran"],
+                        "delta_rel_l2": row["delta_rel_l2"],
+                    })
+                    index += 1
+                if index >= args.max_samples:
+                    break
+            med = np.median([r["adv_rel_l2_nul"] for r in out_rows
+                             if r["model"] == name and r["budget_factor"] == kappa])
+            print(f"[sweep] {name} kappa={kappa:g}: median attacked null-space error {med:.4f}")
+    path = setup.out_root / BUDGET_SWEEP_CSV
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(out_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(out_rows)
+    print(f"[sweep] wrote {path}")
+
+
 def run_attack_suite(args) -> None:
     if not args.data_root:
         raise ValueError("requires --data-root (it holds summary.json and the data).")
@@ -1609,18 +1871,15 @@ def run_attack_suite(args) -> None:
     noise_rel = setup.noise_rel
     attacks_root = setup.out_root
 
-    eps_nominal = args.suite_eps if args.suite_eps is not None else noise_rel
-    if eps_nominal <= 0:
-        raise ValueError(
-            "requires noise_sigma_rel in summary.json, or pass --suite-eps explicitly.")
+    budget_factor = resolve_budget_factor(args.budget_factor)
 
-    # eps is a relative L2 fraction: the per-sample budget is eps*||y_i||_2,
-    # and the step size is derived from it per sample too.
+    # The per-sample budget is kappa * ||P_k eta_i||, the noise the
+    # reconstruction receives, and the step size is derived from it per sample.
     print(f"[suite] dataset={summary.get('dataset')}  "
-          f"eps={eps_nominal:g}*||y||  alpha=2.5*eps/{SUITE_STEPS}")
+          f"budget={budget_factor:g}*||P_k eta||  alpha=2.5*eps/{SUITE_STEPS}")
 
     print(f"[suite] attacks ({len(_SUITE_ATTACKS)}): {', '.join(_SUITE_ATTACKS)}")
-    if not run_suite(args, radon, summary, noise_rel, eps_nominal,
+    if not run_suite(args, radon, summary, noise_rel, budget_factor,
                      attacks_root):
         raise FileNotFoundError(
             f"No checkpoints found under model-dir '{args.model_dir}'."
@@ -1648,10 +1907,10 @@ def parse():
                         help="Base dir containing init_pinv/checkpoints/{model}_best.pt (default: .).")
     parser.add_argument("--out-dir", default=None,
                         help="Output directory (default: attacks_n<noise>).")
-    parser.add_argument("--suite-eps", type=float, default=None,
-                        help="Nominal L2 budget (fraction of ||y||) for the attack suite. "
-                             "Default: noise_sigma_rel from summary.json — the training "
-                             "noise level, the principled budget.")
+    parser.add_argument("--budget-factor", type=float, default=None,
+                        help="Budget factor kappa of the attack suite and the epoch "
+                             "study: the per-sample L2 budget is kappa*||P_k eta||, the "
+                             "noise the reconstruction receives (default 1).")
 
     # ---- run size ----
     parser.add_argument("--max-samples", type=int, default=128,
@@ -1682,17 +1941,19 @@ def parse():
                              f"{', '.join(LIPSCHITZ_RESTRICTIONS)}. 'null' is the "
                              "architecture-comparable number, 'range' and 'full' say how "
                              "much of the comparison is the architecture rather than the "
-                             "learned map, and 'cross' (input in N(A)^perp, output in "
-                             "N(A)) is the gain a null-space attack exploits. Each one "
-                             "costs a full pass of power iterations.")
+                             "learned map, 'cross' (input in N(A)^perp, output in "
+                             "N(A)) couples the measured into the unmeasured channel, "
+                             "and 'attack' is P_N J_g A^+ on range(U_k), the map a "
+                             "null-space attack sees to first order. Each one costs a "
+                             "full pass of power iterations.")
     parser.add_argument("--lipschitz-only", action="store_true",
                         help="Skip the attacks and only estimate the Lipschitz gains of "
                              "the best checkpoints, merging them into an existing "
                              "lipschitz.json. Takes minutes rather than hours.")
-    parser.add_argument("--epoch-eps", type=float, default=None,
-                        help="Budget of --epoch-study (fraction of ||y||). Default: "
-                             "noise_sigma_rel from summary.json, the budget of the "
-                             "attack suite.")
+    parser.add_argument("--budget-sweep", default=None, metavar="K1,K2,...",
+                        help="Instead of the attack suite, run the null-space attack at "
+                             "each budget factor kappa (budget kappa*||P_k eta||) on every "
+                             "model and write budget_sweep.csv.")
     parser.add_argument("--epoch-objective", default="mse",
                         choices=sorted(_EPOCH_OBJECTIVES),
                         help="PGD objective of --epoch-study. 'mse' (the total error) "
@@ -1704,6 +1965,8 @@ def parse():
     # hours of attacking, and a typo there would throw the run away.
     try:
         parse_lipschitz_restrictions(args.lipschitz_restrictions)
+        if args.budget_sweep:
+            parse_budget_factors(args.budget_sweep)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -1714,5 +1977,7 @@ def main() -> None:
     set_seed(SEED)
     if args.epoch_study:
         run_epoch_study(args)
+    elif args.budget_sweep:
+        run_budget_sweep(args)
     else:
         run_attack_suite(args)
