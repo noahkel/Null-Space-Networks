@@ -513,6 +513,8 @@ def test_all_suite_objectives_are_valid(radon):
     pred, gt, clean = _rand(2, 1, IMG, IMG), _rand(2, 1, IMG, IMG), _rand(2, 1, IMG, IMG)
     tgt = _rand(2, 1, IMG, IMG)
     for name in attack._SUITE_OBJECTIVE.values():
+        if name == "random":                 # the baseline takes no gradient
+            continue
         val = attack.attack_objective(pred, gt, name, radon=radon, target=tgt)
         assert torch.isfinite(val), f"objective {name!r} produced non-finite value"
 
@@ -610,11 +612,43 @@ def test_evaluate_batch_scores_the_distance_to_the_target():
     assert "tgt_dist_adv" in attack._AGGREGATE_METRICS
 
 
-def test_epoch_study_budget_defaults_to_the_noise_level():
-    assert attack.resolve_epoch_eps(None, 0.02) == 0.02
-    assert attack.resolve_epoch_eps(0.01, 0.05) == 0.01
+def test_budget_factor_defaults_to_the_received_noise():
+    assert attack.resolve_budget_factor(None) == 1.0
+    assert attack.resolve_budget_factor(0.5) == 0.5
     with pytest.raises(ValueError):
-        attack.resolve_epoch_eps(None, 0.0)
+        attack.resolve_budget_factor(0.0)
+    assert attack.parse_budget_factors("2, 0.5,1,0.5") == [0.5, 1.0, 2.0]
+    with pytest.raises(ValueError):
+        attack.parse_budget_factors("1,-1")
+
+
+def test_random_perturbation_spends_the_whole_budget_in_the_subspace():
+    torch.manual_seed(0)
+    keep = torch.zeros(1, 1, 50, 1, dtype=torch.float64)
+    keep[..., :20, :] = 1.0
+    y = torch.zeros(4, 1, 50, 1, dtype=torch.float64)
+    eps = torch.tensor([0.1, 1.0, 2.0, 5.0], dtype=torch.float64)
+    d = attack.random_perturbation(y, eps, lambda v: v * keep)
+    assert torch.allclose(attack.l2_norm_batch(d), eps)
+    assert torch.allclose(d * keep, d)
+
+
+def test_pgd_keeps_the_best_iterate_not_the_last(radon, monkeypatch):
+    """Fixed-step PGD is not monotone: a good early iterate must survive a
+    worse last one."""
+    adapter, _, _ = _clean_setup(radon)
+    y_clean = torch.zeros(1, 1, radon.LA_ROWS, 1, dtype=torch.float64)
+    v = _rand(1, 1, radon.LA_ROWS, 1)
+    start = 5.0 * v / attack.l2_norm_batch(v).view(-1, 1, 1, 1)
+    monkeypatch.setattr(attack, "random_start", lambda *a, **k: start.clone())
+    # every step lands on the zero perturbation, the worst point for "mse"
+    monkeypatch.setattr(attack, "project_delta", lambda d, *a, **k: torch.zeros_like(d))
+    monkeypatch.setattr(attack, "SUITE_STEPS", 3)
+    monkeypatch.setattr(attack, "SUITE_RESTARTS", 1)
+    res = attack.pgd_attack(adapter, x_gt=torch.zeros(1, 1, IMG, IMG, dtype=torch.float64),
+                            y_clean=y_clean, clean_pred=None, eps=10.0, alpha=1.0,
+                            objective="mse")
+    assert torch.allclose(res.delta, start)
 
 # =========================================================================== #
 # Real-operator / real-model integration tests.
@@ -1117,14 +1151,40 @@ def test_suite_step_size_is_per_sample():
     assert torch.allclose(alpha, 2.5 * eps / 50)
 
 
-def test_suite_eps_batch_is_a_relative_l2_budget():
-    """A saturated ball carries exactly eps*||y_i|| of L2 mass, per sample."""
+def test_noise_budget_is_the_noise_the_reconstruction_receives(matrix_radon):
+    """eps_i = kappa ||P_k eta_i||, read off the clean input of the attack
+    (y_clean = P_k y^delta) and the ground truth, per sample."""
+    r = matrix_radon
     torch.manual_seed(0)
-    y = torch.randn(3, 1, 180, 182)
-    eps = attack.suite_eps_batch(y, 0.01)
-    delta = attack.proj_l2_ball(torch.randn_like(y) * 1e6, eps)
-    rel = delta.reshape(3, -1).norm(dim=1) / y.reshape(3, -1).norm(dim=1)
-    assert torch.allclose(rel, torch.full((3,), 0.01), atol=1e-5)
+    x = torch.rand(3, 1, _RES, _RES, dtype=torch.float64)
+    y = r.forward_la(x)
+    eta = utils.measurement_noise(r.mask_la(torch.randn_like(y)), y, 0.05)
+    y_clean = r.proj_ran(y + eta)
+    expected = attack.l2_norm_batch(r.proj_ran(eta))
+    assert torch.allclose(attack.noise_budget_batch(r, x, y_clean), expected, rtol=1e-9)
+    assert torch.allclose(attack.noise_budget_batch(r, x, y_clean, 2.0), 2 * expected,
+                          rtol=1e-9)
+    # the reconstruction receives a part of the noise, not all of it
+    assert torch.all(expected < 0.05 * attack.l2_norm_batch(y))
+
+
+def test_measurement_noise_is_relative_masked_and_independent_of_tau(matrix_radon):
+    """The noise lives on every measured reading (zero on the unmeasured rows),
+    has norm sigma ||y|| per sample, and is the same draw whatever the
+    truncation: only P_k eta, the part the reconstruction sees, depends on tau."""
+    r = matrix_radon
+    torch.manual_seed(1)
+    x = torch.rand(2, 1, _RES, _RES, dtype=torch.float64)
+    y = r.forward_la(x)
+    g = torch.randn_like(y)
+    eta = utils.measurement_noise(r.mask_la(g), y, 0.02)
+    assert torch.allclose(attack.l2_norm_batch(eta), 0.02 * attack.l2_norm_batch(y))
+    unmeasured = ~torch.from_numpy(r._la_mask())
+    assert torch.all(eta[..., unmeasured, :] == 0)
+    # not confined to range(U_k): a part lies in the readings the truncation discards
+    assert float(attack.l2_norm_batch(eta - r.proj_ran(eta)).min()) > 0
+    # rescaling the same draw gives the noise of another level
+    assert torch.allclose(utils.measurement_noise(r.mask_la(g), y, 0.04), 2 * eta)
 
 
 # 5 — consistency against the *clean* measurement.
@@ -2341,8 +2401,7 @@ def test_truncation_error_formulas_match_the_pipeline(matrix_full, sigma):
         for i in range(x.shape[0]):
             with truncated_to(matrix_full, k) as r:
                 y = r.forward_la(x[i:i + 1])
-                eta = r.proj_ran(noise[i:i + 1])
-                eta = sigma * (torch.linalg.norm(y) / torch.linalg.norm(eta)) * eta
+                eta = utils.measurement_noise(r.mask_la(noise[i:i + 1]), y, sigma)
                 e_ran, e_nul = r.decompose_error(r.backward_la(y + eta) - x[i:i + 1])
             null2, range2 = err.squared([k], sigma)
             assert float((e_nul ** 2).sum()) == pytest.approx(null2[i, 0], rel=1e-8)
@@ -2363,8 +2422,7 @@ def test_truncation_optimum_and_candidates_match_brute_force(matrix_full):
         with truncated_to(matrix_full, k_for_tau(s, tau)) as r:
             for i in range(x.shape[0]):
                 y = r.forward_la(x[i:i + 1])
-                eta = r.proj_ran(noise[i:i + 1])
-                eta = sigma * (torch.linalg.norm(y) / torch.linalg.norm(eta)) * eta
+                eta = utils.measurement_noise(r.mask_la(noise[i:i + 1]), y, sigma)
                 x_init = r.backward_la(y + eta)
                 vals.append(utils.rel_l2_np(x_init.squeeze().numpy(), x[i, 0].numpy()))
         return float(np.mean(vals))
@@ -2382,6 +2440,16 @@ def test_truncation_optimum_and_candidates_match_brute_force(matrix_full):
         assert abs(got - factor * dim_ref) == min(abs(d - factor * dim_ref) for d in dims)
     assert res["recommended"]["tau"] == res["optimal"]["0.01"]["tau"]
     assert res["cross_check"]["rel_diff"] < 1e-8
+    # the share of the noise the reconstruction receives, against sqrt(k/m)
+    k_ref, m = res["dims"]["k_ref"], res["dims"]["range_M"]
+    received = res["noise_scheme"]["received_fraction"]["mean"]
+    assert received == pytest.approx(math.sqrt(k_ref / m), rel=0.25)
+    with truncated_to(matrix_full, k_ref) as r:
+        y = r.forward_la(x[:1])
+        eta = utils.measurement_noise(r.mask_la(noise[:1]), y, 0.01)
+        direct = float(torch.linalg.norm(r.proj_ran(eta)) / torch.linalg.norm(eta))
+    assert res["noise_scheme"]["received_fraction"]["max"] >= direct - 1e-9
+    assert res["noise_scheme"]["received_fraction"]["min"] <= direct + 1e-9
 
 
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
@@ -2444,3 +2512,170 @@ def test_unknown_phantom_family_is_refused():
     from src.create_phantom_data import phantom_generator
     with pytest.raises(ValueError, match="unknown phantom family"):
         phantom_generator("lodopab", 32)
+
+
+# =========================================================================== #
+# 14. Attack strength and the residual on the discarded readings.
+# =========================================================================== #
+@pytest.mark.parametrize("seed", range(5))
+def test_max_quadratic_on_ball_matches_brute_force(seed):
+    """The trust-region solution is the global maximum: no point of a dense
+    sampling of the circle does better, and the maximiser lies on it."""
+    rng = np.random.default_rng(seed)
+    b = rng.standard_normal(2)
+    d = rng.uniform(0.5, 4.0, 2)
+    r = float(rng.uniform(0.1, 3.0))
+    best, c = attack.max_quadratic_on_ball(b, d, r)
+    phi = np.linspace(0, 2 * np.pi, 200001)
+    circle = r * np.stack([np.cos(phi), np.sin(phi)], axis=1)
+    brute = float(np.max(((b + circle) ** 2 * d).sum(1)))
+    assert best == pytest.approx(brute, rel=1e-8)
+    assert np.linalg.norm(c) == pytest.approx(r, rel=1e-10)
+    assert best == pytest.approx(float(np.sum(d * (b + c) ** 2)), rel=1e-12)
+
+
+def test_max_quadratic_on_ball_hard_case():
+    """b orthogonal to the direction of the largest weight: the maximiser has to
+    turn into that direction although the secular equation never reaches r."""
+    b = np.array([1.0, 0.0])
+    d = np.array([1.0, 4.0])
+    r = 2.0
+    best, c = attack.max_quadratic_on_ball(b, d, r)
+    phi = np.linspace(0, 2 * np.pi, 200001)
+    circle = r * np.stack([np.cos(phi), np.sin(phi)], axis=1)
+    assert best == pytest.approx(float(np.max(((b + circle) ** 2 * d).sum(1))), rel=1e-8)
+    assert np.linalg.norm(c) == pytest.approx(r)
+
+
+def _nsn_setup(r, seed=0, sigma=0.05, n=2):
+    from src.unet import UNet
+    from src.wrappers import NSN
+    torch.manual_seed(seed)
+    x = torch.rand(n, 1, _RES, _RES, dtype=torch.float64)
+    y = r.forward_la(x)
+    eta = utils.measurement_noise(r.mask_la(torch.randn_like(y)), y, sigma)
+    y_clean = r.proj_ran(y + eta)
+    model = NSN(unet=UNet(), radon=r).double().eval()
+    return x, y + eta, y_clean, model
+
+
+def test_range_certificate_bounds_and_is_reached_by_the_range_attack(matrix_radon, monkeypatch):
+    """The certificate is the exact maximum of the NSN's range error over the
+    feasible set: its clean value is ||A^+ P_k eta||, no attack exceeds the
+    maximum, and a long PGD run on the range objective comes close to it."""
+    r = matrix_radon
+    x, _, y_clean, model = _nsn_setup(r)
+    eps = attack.noise_budget_batch(r, x, y_clean)
+    clean, worst = attack.range_growth_certificate(r, x, y_clean, eps)
+    adapter = attack.ModelAttackAdapter(model=model, radon=r, projector=r.proj_ran)
+    with torch.no_grad():
+        pred, _, _ = adapter.forward(y_clean)
+        e_ran, _ = r.decompose_error(pred - x)
+    assert np.allclose(clean, attack.l2_norm_batch(e_ran).numpy(), rtol=1e-8)
+    assert np.all(worst > clean)
+
+    monkeypatch.setattr(attack, "SUITE_STEPS", 300)
+    torch.manual_seed(0)
+    res = attack.pgd_attack(adapter, x_gt=x, y_clean=y_clean, clean_pred=pred, eps=eps,
+                            alpha=attack.suite_step_size(eps, 300), objective="range")
+    with torch.no_grad():
+        pred_adv, _, _ = adapter.forward(res.y_adv)
+        e_ran_adv, _ = r.decompose_error(pred_adv - x)
+    reached = attack.l2_norm_batch(e_ran_adv).numpy()
+    assert np.all(reached <= worst * (1 + 1e-9))
+    # fixed-step PGD gets close but not all the way; the certificate says how close
+    assert np.all(reached >= clean + 0.9 * (worst - clean))
+
+    # the maximiser itself, mapped back to a sinogram, attains the maximum
+    la = r._la_mask()
+    eta_k = attack.received_noise(r, x, y_clean)
+    b = (eta_k[..., la, :].reshape(x.shape[0], -1) @ r._U_k_la).numpy()
+    d = 1.0 / r._s_k_la.numpy() ** 2
+    for i in range(x.shape[0]):
+        best, c = attack.max_quadratic_on_ball(b[i], d, float(eps[i]))
+        delta = torch.zeros_like(y_clean[i:i + 1])
+        delta[..., la, :] = (r._U_k_la @ torch.from_numpy(c)).reshape(1, 1, -1, r.det_count)
+        assert float(torch.linalg.norm(delta)) == pytest.approx(float(eps[i]), rel=1e-9)
+        with torch.no_grad():
+            p_i, _, _ = adapter.forward(y_clean[i:i + 1] + delta)
+            e_i, _ = r.decompose_error(p_i - x[i:i + 1])
+        assert float(torch.linalg.norm(e_i)) == pytest.approx(worst[i], rel=1e-8)
+
+
+def test_residual_on_the_discarded_readings_sees_a_null_space_error(matrix_radon):
+    """P_k A x_hat matches the data exactly for any null-space error e_N, but
+    on the discarded readings the residual is A e_N - (I - P_k) eta."""
+    r = matrix_radon
+    torch.manual_seed(2)
+    x = torch.rand(1, 1, _RES, _RES, dtype=torch.float64)
+    y = r.forward_la(x)
+    eta = utils.measurement_noise(r.mask_la(torch.randn_like(y)), y, 0.01)
+    y_meas = y + eta
+    y_clean = r.proj_ran(y_meas)
+    e_null = r.proj_null_image(torch.randn_like(x))
+    pred = x + r.proj_null_image(r.backward_la(y_clean) - x) * 0 + e_null
+    zero = torch.zeros_like(y_clean)
+    row = attack.evaluate_batch(
+        x_gt=x, clean_init=x, clean_y=y_clean, clean_pred=pred, adv_init=x, adv_y=y_clean,
+        adv_pred=pred, delta=zero, success_mse_factor=2.0, radon=r, y_meas=y_meas)[0]
+    den = float(torch.linalg.norm(y_meas))
+    disc_eta = eta - r.proj_ran(eta)
+    expected = r.forward_la(e_null) - disc_eta
+    expected = expected - r.proj_ran(expected)
+    assert row["clean_residual_disc_rel"] == pytest.approx(
+        float(torch.linalg.norm(expected)) / den, rel=1e-8)
+    assert row["gt_residual_full_rel"] == pytest.approx(float(torch.linalg.norm(eta)) / den,
+                                                        rel=1e-8)
+    assert row["gt_residual_disc_rel"] == pytest.approx(
+        float(torch.linalg.norm(disc_eta)) / den, rel=1e-8)
+
+
+def test_lipschitz_attack_gain_matches_the_operator_through_the_pseudoinverse(radon):
+    """The 'attack' restriction linearises at the measurement: the estimate is
+    the largest singular value of P_N M A^+ (on the range of the projector,
+    the identity for the fake operator), scaled by ||y0|| / ||x_gt||."""
+    model = _LinearCorrection(radon)
+    Pn = _projector_matrix(radon, "null").numpy()
+    expected_op = np.linalg.svd(Pn @ model.M.numpy() @ radon._A_la_pinv.numpy(),
+                                compute_uv=False)[0]
+    x_gt = torch.randn(1, 1, radon.IMG, radon.IMG, dtype=torch.float64)
+    y0 = torch.randn(1, 1, radon.LA_ROWS, 1, dtype=torch.float64)
+    in_proj, out_proj = attack.restriction_projectors(radon, "attack")
+    res = attack.estimate_lipschitz(
+        model=model, clean_cache=[(x_gt, None, y0)], radon=radon, n_samples=1,
+        n_iters=300, proj=in_proj, out_proj=out_proj, through_pinv=True)
+    scale = float(torch.linalg.norm(y0)) / float(torch.linalg.norm(x_gt))
+    assert res["mean"] == pytest.approx(scale * expected_op, rel=1e-4)
+    assert res["conv_max"] < 1e-6
+
+
+# =========================================================================== #
+# 15. make_tables.py - the statistics the thesis' tables report.
+# =========================================================================== #
+def test_holm_rejects_step_down():
+    import make_tables as T
+    # sorted p: 0.001 <= 0.05/4, 0.01 <= 0.05/3, 0.03 > 0.05/2 -> stop
+    assert T.holm([0.03, 0.001, 0.2, 0.01]) == [False, True, False, True]
+    assert T.holm([0.5, 0.6]) == [False, False]
+
+
+def test_paired_difference_median_interval_and_wilcoxon():
+    pytest.importorskip("scipy")
+    import make_tables as T
+    rng = np.random.default_rng(0)
+    d = rng.normal(1.0, 0.5, 200)
+    med, lo, hi, p = T.paired(d, n_boot=2000)
+    assert med == pytest.approx(float(np.median(d)))
+    assert lo < med < hi
+    assert p < 1e-10
+    assert T.paired(rng.normal(0.0, 1.0, 50), n_boot=500)[3] > 1e-3
+
+
+def test_run_directory_names_are_parsed():
+    import make_tables as T
+    r = T.Run(Path("attacks_n0.05_tau0.031_l2_v2"))
+    assert (r.noise, r.tau, r.phantoms) == (0.05, 0.031, "single")
+    r = T.Run(Path("attacks_n0.01_ellipses_l2_v2"))
+    assert (r.noise, r.tau, r.phantoms) == (0.01, T.REF_TAU, "multi")
+    assert T.sci(4e-3) == "$4\\cdot10^{-3}$" and T.sci(6.2e-2) == "$6.2\\cdot10^{-2}$"
+    assert T.small(1.3e-7) == "$1.3\\cdot10^{-7}$" and T.small(2.345) == "2.35"

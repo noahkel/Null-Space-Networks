@@ -26,6 +26,7 @@ The thin top-level ``visualise.py`` is the CLI entry point and simply calls
 """
 from __future__ import annotations
 
+import csv
 import json
 import math
 from pathlib import Path
@@ -438,8 +439,8 @@ def save_totals_decomposition_bar(
     ax.set_xticklabels(models)
     ax.set_yscale("log")
     ax.set_ylabel("rel-L2 error  (median, log scale)")
-    ax.set_title(f"Total error next to its range/null decomposition — clean vs adversarial\n"
-                 f"({attack_name}, eps={eps:g};  total² = range² + null²{_init_tag(';  init: ')})", fontsize=9)
+    ax.set_title(f"Total, range and null-space error, clean and attacked ({attack_name})",
+                 fontsize=9)
     ax.grid(True, axis="y", which="both", alpha=0.3)
     ax.legend(fontsize=8, ncol=2)
     plt.tight_layout()
@@ -479,10 +480,8 @@ def save_null_growth_headline(
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("||error component||  (median)")
-    ax.set_title("Headline - null-space error growth under attack "
-                 "(%s, eps=%g)%s\nfair signal = growth of ||e_nul||; for data-consistent "
-                 "models ||e_ran|| equals the init's range error (inversion floor)"
-                 % (attack_name, eps, _init_tag()), fontsize=9)
+    ax.set_title("Null-space and range error, clean and attacked (%s)" % attack_name,
+                 fontsize=9)
     ax.legend(fontsize=8)
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
@@ -529,8 +528,8 @@ def save_target_distance_plot(
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("||x_hat - t|| / ||x_gt - t||  (median)")
-    ax.set_title("Distance to the target (%s, eps=%g)%s\n1 = ground truth, 0 = target reached"
-                 % (attack_name, eps, _init_tag()), fontsize=9)
+    ax.set_title("Distance to the target (%s; 1 = ground truth, 0 = target)" % attack_name,
+                 fontsize=9)
     ax.legend(fontsize=8, loc="lower right")
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
@@ -562,9 +561,7 @@ def save_consistency_plot(
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("||proj_ran(A x_hat) - y|| / ||y||  (median)")
-    ax.set_title("Measurement consistency: clean vs adversarial (eps=%g)%s\n"
-                 "stays low => adversarial error lives in the null subspace"
-                 % (eps, _init_tag()), fontsize=9)
+    ax.set_title("Residual on the retained measurements, clean and attacked", fontsize=9)
     ax.legend(fontsize=8)
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
@@ -579,6 +576,7 @@ _LIPSCHITZ_RESTRICTIONS = {
     "range": ("range: ||P_R . J_g . P_R||", "#55A868"),
     "full":  ("unrestricted: ||J_g||", "#8172B2"),
     "cross": ("cross: ||P_N . J_g . P_R||", "#CCB974"),
+    "attack": ("attack: ||P_N . J_g . A^+|| (relative)", "#C44E52"),
 }
 
 
@@ -622,9 +620,8 @@ def save_lipschitz_plot(out_dir: Path, lip_res: Dict[str, Dict]) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("local Lipschitz of the learned correction g = f - x")
-    ax.set_title("local Lipschitz of the learned correction%s\n"
-                 "operator norm of P . J(f-x) . P per subspace (power iteration)"
-                 % _init_tag(), fontsize=9)
+    ax.set_title("Local gain of the learned correction per restriction (power iteration)",
+                 fontsize=9)
     ax.legend(fontsize=8)
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
@@ -746,7 +743,7 @@ def save_suite_scatter(out_dir: Path, rows_by_model: Dict[str, List[Dict]],
     ax1.grid(True, alpha=0.3)
     _identity_line(ax1)
     ax1.legend(fontsize=8)
-    fig.suptitle(f"{attack_name}: per-sample cross-model scatter (eps={eps:g}){_init_tag()}", fontsize=11)
+    fig.suptitle(f"{attack_name}: per-sample errors of both models", fontsize=11)
     plt.tight_layout()
     plt.savefig(out_dir / "scatter_cross_model.png", dpi=150)
     plt.close(fig)
@@ -779,8 +776,7 @@ def save_attack_comparison_scatter(out_dir: Path,
         ax.set_title(m)
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8)
-    fig.suptitle(f"Adversarial error by channel, per model across attacks (eps={eps:g}){_init_tag()}",
-                 fontsize=11)
+    fig.suptitle("Range and null-space error of every attacked sample", fontsize=11)
     plt.tight_layout()
     plt.savefig(out_dir / "scatter_attacks_by_channel.png", dpi=150)
     plt.close(fig)
@@ -839,9 +835,7 @@ def save_consistency_overview(init_dir: Path, all_rows: Dict[str, Dict[str, List
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("||proj_ran(A x_hat) - y|| / ||y||  (median)")
-    ax.set_title("Data-consistency across attacks (eps=%g)%s\n"
-                 "flat at the clean marker => adversarial error is invisible to the "
-                 "measurements (data-consistent)" % (eps, _init_tag()), fontsize=9)
+    ax.set_title("Residual on the retained measurements, per attack", fontsize=9)
     ax.legend(fontsize=7, ncol=2)
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
@@ -885,9 +879,8 @@ def save_ghost_structure_plot(attack_dir: Path, rows_by_model: Dict[str, List[Di
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("||e_nul|| / ||e||  (adversarial error, per sample)")
-    ax.set_title("%s: ghost-likeness of the adversarial error (eps=%g)%s\n"
-                 "box near 1 => error hides in the null space (ghost-like); "
-                 "green = clean baseline" % (attack_name, eps, _init_tag()), fontsize=9)
+    ax.set_title("Null-space fraction of the attacked error (%s); green: clean median"
+                 % attack_name, fontsize=9)
     ax.legend(fontsize=8)
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
@@ -1105,16 +1098,14 @@ def save_epoch_attackability_plot(csv_path, out_path,
         bl = ax.axvline(best[0], color="0.4", ls=":", lw=1.2)
         handles.append(bl)
         bl.set_label(f"best-val epoch ({int(best[0])})")
-    ax.legend(handles=handles, fontsize=8, loc="best")
-    # Older studies wrote no eps column; they all ran at eps = 0.01.
-    eps = rows[0].get("eps", float("nan"))
-    eps_tag = "  |  eps=%g" % eps if np.isfinite(eps) else ""
-    ax.set_title("Attackability vs epoch — %s%s%s\n"
-                 "adv rel-L2 rising while val loss diverges from train => "
-                 "attackability tracks overfitting" % (Path(csv_path).stem, eps_tag, _init_tag()),
-                 fontsize=9)
+    # Below the axes: loc="best" only avoids the artists of ax, not the loss
+    # curves on the twin axis.
+    ax.legend(handles=handles, fontsize=8, loc="upper center",
+              bbox_to_anchor=(0.5, -0.12), ncol=3, frameon=False)
+    ax.set_title("Clean and attacked %s and training loss per epoch (%s)"
+                 % (what, Path(csv_path).stem), fontsize=9)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1253,8 +1244,7 @@ def save_truncation_plots(study_dir) -> bool:
         ax.set_xlabel("index i of the singular value")
         ax.set_ylabel(r"$\sigma_i / \sigma_{\max}$")
         ax.set_xlim(1, s.size)
-        ax.set_title("Singular values of the limited-angle operator; a cut at tau keeps "
-                     "every direction above its line", fontsize=9, pad=10)
+        ax.set_title("Singular values of the limited-angle operator", fontsize=9, pad=10)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend(fontsize=7, loc="lower left")
         plt.tight_layout()
@@ -1281,7 +1271,7 @@ def save_truncation_plots(study_dir) -> bool:
         a1.set_ylim(bottom=1e-2 * min(optimal[key]["rel_l2"]["mean"] for key in keys))
         a1.set_xlabel("truncation threshold tau")
         a1.set_ylabel("mean relative error of the pseudoinverse")
-        a1.set_title("Pseudoinverse error against tau; dots mark the optimum", fontsize=9)
+        a1.set_title("Pseudoinverse error against tau", fontsize=9)
         a1.grid(True, which="both", alpha=0.25)
         a1.legend(fontsize=7, loc="upper right")
 
@@ -1294,13 +1284,53 @@ def save_truncation_plots(study_dir) -> bool:
                     label=f"{name.replace('_', ' ')}: tau = {rec['tau']:g}, dim N = {rec['dim_null']}")
         a2.set_xlabel("truncation threshold tau")
         a2.set_ylabel("dim N(A)")
-        a2.set_title(f"Null-space dimension; candidates for a second run at sigma = {run_key}",
-                     fontsize=9)
+        a2.set_title("Dimension of the numerical null space", fontsize=9)
         a2.grid(True, which="both", alpha=0.25)
         a2.legend(fontsize=7, loc="upper left")
         plt.tight_layout()
         plt.savefig(study_dir / "tau_error.png", dpi=150)
         plt.close(fig)
+    return True
+
+
+BUDGET_SWEEP_CSV = "budget_sweep.csv"     # written by attack.py --budget-sweep
+
+
+def save_budget_sweep_plot(attacks_root) -> bool:
+    """Median attacked null-space error against the budget factor kappa (budget
+    kappa * ||P_k eta||), one curve per model, next to the median clean error.
+    Returns False when the sweep was not run."""
+    root = Path(attacks_root)
+    path = root / BUDGET_SWEEP_CSV
+    if not path.exists():
+        return False
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = [dict(r) for r in csv.DictReader(f)]
+    models = sorted({r["model"] for r in rows})
+    if not models:
+        return False
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for i, model in enumerate(models):
+        mine = [r for r in rows if r["model"] == model]
+        kappas = sorted({float(r["budget_factor"]) for r in mine})
+        adv = [np.median([float(r["adv_rel_l2_nul"]) for r in mine
+                          if float(r["budget_factor"]) == k]) for k in kappas]
+        clean = np.median([float(r["clean_rel_l2_nul"]) for r in mine])
+        colour = ("#d62728", "#1f77b4", "#2ca02c")[i % 3]
+        ax.loglog(kappas, adv, marker="o", color=colour, label=f"{model}, attacked")
+        ax.axhline(clean, color=colour, ls=":", lw=1, label=f"{model}, clean")
+    all_k = sorted({float(r["budget_factor"]) for r in rows})
+    ax.set_xticks(all_k)
+    ax.set_xticklabels([f"{k:g}" for k in all_k])
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_xlabel("budget factor kappa (budget = kappa * ||P_k eta||)")
+    ax.set_ylabel("median null-space error / ||x_gt||")
+    ax.set_title("Null-space attack at several budgets", fontsize=9)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(root / "budget_sweep.png", dpi=150)
+    plt.close(fig)
     return True
 
 
@@ -1425,4 +1455,6 @@ def render_tree(attacks_root) -> None:
     if (root / TRUNCATION_DIR / "truncation.json").exists():
         step("truncation study")
         save_truncation_plots(root / TRUNCATION_DIR)
+    if save_budget_sweep_plot(root):
+        print(f"[visualise] budget sweep -> {root / 'budget_sweep.png'}")
     print(f"[visualise] done -> {root}")

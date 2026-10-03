@@ -3,7 +3,8 @@
 For each sample, the pipeline:
   1. draws a phantom from a fixed seed: one random ellipse (``--phantom single``,
      the main experiment) or DIVAL's multi-ellipse phantoms (``--phantom ellipses``),
-  2. simulates the limited-angle sinogram y = A_la x_gt and adds relative noise,
+  2. simulates the limited-angle sinogram y = A_la x_gt and adds relative noise
+     on every measured reading, drawn independently of the truncation,
   3. saves the ground truth, the pinv (truncated-SVD) initialisation and the
      sinogram as .npy files under <out_dir>/<noise>/{gt,pinv,sino}/,
   4. writes a summary.json with the geometry and noise statistics used by
@@ -24,7 +25,7 @@ import torch
 from src.radon import MatrixRadonAdapter
 from dival.datasets import EllipsesDataset
 
-from src.utils import ensure_dir, set_seed, to_4d
+from src.utils import ensure_dir, measurement_noise, set_seed, to_4d
 from odl.phantom import ellipsoid_phantom
 
 
@@ -62,6 +63,11 @@ def single_ellipse_generator(dataset, part='train'):
 
 
 PHANTOMS = ("single", "ellipses")
+
+# Recorded in summary.json. "measured_readings": the noise is drawn on every
+# measured reading, independently of tau. Data without this tag were made with
+# the noise confined to range(U_k) and are not reused.
+NOISE_MODEL = "measured_readings"
 
 
 def phantom_generator(kind: str, image_size: int, part: str = "train"):
@@ -130,14 +136,15 @@ def main() -> None:
     angles = np.linspace(0, 180, NUM_ANGLES, endpoint=False) * np.pi / 180
     phi = (MIN_ANGLE * np.pi / 180, MAX_ANGLE * np.pi / 180)
 
-    # One operator for everything: forward projection, the range projector the
-    # noise is drawn through, and the truncated pseudoinverse that reconstructs.
-    # An earlier version drew the noise through a second, essentially
-    # untruncated adapter (svd_threshold=1e-15). That cost a full extra SVD and
-    # placed part of the noise in directions A^+ annihilates, so the nominal
-    # noise level overstated what the reconstruction actually received -- while
-    # the adversarial budget, which uses this operator's projector, was fully
-    # effective. src/truncation.py quantifies the difference.
+    # One operator for everything: forward projection and the truncated
+    # pseudoinverse that reconstructs. The noise is drawn on all measured
+    # readings, not inside range(U_k): a draw confined to range(U_k) made the
+    # physical noise level depend on tau (variance sigma^2 ||y||^2 / k per
+    # retained direction instead of / m) and left the readings the truncation
+    # discards noise-free, so the null-space content the networks learn could
+    # be read off them exactly. The pseudoinverse receives P_k eta, about
+    # sqrt(k/m) of the noise; the attack budget is that received part
+    # (src/attack.py, noise_budget_batch).
     radon = MatrixRadonAdapter(
         resolution=IMG_SIZE,
         angles=angles,
@@ -156,23 +163,26 @@ def main() -> None:
 
     y_diff_norms: List[float] = []
     y_norms: List[float] = []
+    received_norms: List[float] = []
 
     print("Generating data...")
     print(f"x_gt from the '{args.phantom}' phantoms, seed {phantom_seed}")
     print("y from radon.forward_la")
-    print("y_delta = y with added noise, drawn from range(U_k)")
+    print("y_delta = y with added noise on every measured reading (independent of tau)")
     print("x_init from radon.backward_la (truncated pinv) -> pinv/")
 
     for i in range(N_SAMPLES):
         x_gt = torch.from_numpy(next(gen).data).to(DEVICE)
 
         y = radon.forward_la(to_4d(x_gt))
-        noise = radon.proj_ran(torch.randn_like(y))
-        add_noise = NOISE_sigma_REL * (torch.linalg.norm(y) / torch.linalg.norm(noise)) * noise
+        # One standard normal draw per sample, the same at every tau and,
+        # rescaled, at every noise level.
+        add_noise = measurement_noise(radon.mask_la(torch.randn_like(y)), y, NOISE_sigma_REL)
         y_delta = y + add_noise
 
         y_norms.append(float(torch.linalg.norm(y.reshape(-1))))
         y_diff_norms.append(float(torch.linalg.norm((add_noise).reshape(-1))))
+        received_norms.append(float(torch.linalg.norm(radon.proj_ran(add_noise).reshape(-1))))
 
         x_init = radon.backward_la(y_delta).squeeze()
 
@@ -181,6 +191,7 @@ def main() -> None:
         np.save(OUT_DIR / "sino" / f"{i:05d}.npy", y_delta.squeeze().detach().cpu().numpy())
 
     y_diff_norms = np.array(y_diff_norms)
+    received_norms = np.array(received_norms)
     np.save(OUT_DIR / "y_diff_norms.npy", y_diff_norms)
 
     summary = {
@@ -199,6 +210,15 @@ def main() -> None:
         "noise_sigma_rel": float(NOISE_sigma_REL),
         "mean_norm_y": float(np.array(y_norms).mean()),
         "mean_norm_y_minus_y_delta": float(y_diff_norms.mean()),
+        # Which noise model made the data: the stages refuse data from the
+        # earlier one, whose noise lived in range(U_k).
+        "noise_model": NOISE_MODEL,
+        "measured_readings": int(radon.n_la * radon.det_count),
+        "retained_directions": int(radon._s_k_la.numel()),
+        # ||P_k eta|| / ||eta||: the share of the noise the reconstruction receives
+        # (over the samples with any noise: an empty phantom has y = 0)
+        "mean_noise_received_fraction": float(
+            (received_norms[y_diff_norms > 0] / y_diff_norms[y_diff_norms > 0]).mean()),
         "operator_norm_A2": float(L),
         "svd_threshold": SVD_THRESH,
     }
