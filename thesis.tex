@@ -1,6 +1,6 @@
 \documentclass{article}
 \usepackage{graphicx}
-\usepackage{amsmath, amssymb, amsthm, mathtools, dsfont}
+\usepackage{amsmath, amssymb, mathtools, dsfont}
 \usepackage[table]{xcolor}
 \usepackage{nicematrix}
 \usepackage{listings}
@@ -58,8 +58,8 @@
 \addbibresource{references.bib}
 
 \DeclareMathOperator*{\argmax}{arg\,max}
-\newtheorem{proposition}{Proposition}[section]
-\newtheorem{lemma}[proposition]{Lemma}
+% the results derived in the text are numbered equations, referred to with \eqref
+\numberwithin{equation}{section}
 
 % Results that are still pending. Every number of the single-ellipse runs comes
 % from the runs with the noise on every measured reading (Section~\ref{sec:data});
@@ -386,46 +386,43 @@ $\mathbf{x}^\dagger$ is the ground truth, into its component in $\mathcal{N}_\ta
 $\mathcal{N}_\tau^\perp=\operatorname{range}(\mathbf{V}_k)$, the part of image space that the retained
 measurements determine, makes precise what the projection guarantees. We call
 $(\mathbf{I}-\mathbf{P}_{\mathcal{N}_\tau})\mathbf{e}$ the \emph{range component} of the error, and
-$\mathbf{P}_k=\mathbf{U}_k\mathbf{U}_k^{*}$ is the projector onto the retained part of sinogram space.
-%TODO: Dont like the proposition wording!
-\begin{proposition}[Data consistency and range floor]\label{prop:floor}
-Assume
-(P1) that $\mathbf{U}_k$, $\Sigma_k$ and $\mathbf{V}_k$ are the retained factors of a singular value
-decomposition $\mathbf{A}=\mathbf{U}\Sigma\mathbf{V}^{*}$, so that $\mathbf{U}^{*}\mathbf{U}=\mathbf{I}$,
-$\mathbf{V}_k^{*}\mathbf{V}_k=\mathbf{I}$ and
-$\mathbf{U}_k^{*}\mathbf{A}=\Sigma_k\mathbf{V}_k^{*}$;
-(P2) that $\hat{\mathbf{x}}$ is the output of the Nullspace Network for a sinogram $\mathbf{y}'$ and
-arbitrary weights $\theta$,
-$\hat{\mathbf{x}}=\mathbf{A}^{+}\mathbf{y}'+\mathbf{P}_{\mathcal{N}_\tau}N_\theta(\mathbf{A}^{+}\mathbf{y}')$; and
-(P3) that $\mathbf{y}'=\mathbf{A}\mathbf{x}^\dagger+\boldsymbol{\eta}+\boldsymbol{\delta}$, measurement noise
-$\boldsymbol{\eta}$ plus a perturbation $\boldsymbol{\delta}$. Then
-\[\text{(a)}\quad \mathbf{P}_k\mathbf{A}\hat{\mathbf{x}}=\mathbf{P}_k\mathbf{y}',
-\qquad\qquad
-\text{(b)}\quad (\mathbf{I}-\mathbf{P}_{\mathcal{N}_\tau})(\hat{\mathbf{x}}-\mathbf{x}^\dagger)
-=\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta}).\]
-\end{proposition}
-\begin{proof}
-By (P1), $\mathbf{P}_k\mathbf{A}=\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}$, and with
-$\mathbf{V}_k^{*}\mathbf{V}_k=\mathbf{I}$, again (P1),
-$\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}=\mathbf{U}_k\Sigma_k(\mathbf{V}_k^{*}-\mathbf{V}_k^{*}\mathbf{V}_k\mathbf{V}_k^{*})=0$
-and $\mathbf{P}_k\mathbf{A}\mathbf{A}^{+}=\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}\mathbf{V}_k\Sigma_k^{-1}\mathbf{U}_k^{*}=\mathbf{P}_k$.
-Applying $\mathbf{P}_k\mathbf{A}$ to the two terms of (P2) gives (a); the network term drops out whatever
-$\theta$ is. For (b), $\mathbf{I}-\mathbf{P}_{\mathcal{N}_\tau}=\mathbf{V}_k\mathbf{V}_k^{*}$ annihilates
-the network term of (P2) and leaves $\mathbf{A}^{+}\mathbf{y}'$ unchanged, since its range lies in
-$\operatorname{range}(\mathbf{V}_k)$. By (P1), $\mathbf{U}_k^{*}\mathbf{A}=\Sigma_k\mathbf{V}_k^{*}$, so
-$\mathbf{A}^{+}\mathbf{A}=\mathbf{V}_k\mathbf{V}_k^{*}$, and inserting (P3) gives
-$\mathbf{V}_k\mathbf{V}_k^{*}(\mathbf{A}^{+}\mathbf{y}'-\mathbf{x}^\dagger)
-=\mathbf{V}_k\mathbf{V}_k^{*}\mathbf{x}^\dagger+\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})-\mathbf{V}_k\mathbf{V}_k^{*}\mathbf{x}^\dagger$.
-\end{proof}
-\noindent
-Part (a) is the sense in which the Nullspace Network is data consistent: measuring its output reproduces
+$\mathbf{P}_k=\mathbf{U}_k\mathbf{U}_k^{*}$ is the projector onto the retained part of sinogram space.\\
+Everything the projection guarantees rests on three properties of the retained factors: the columns of
+$\mathbf{U}_k$ and of $\mathbf{V}_k$ are orthonormal, and $\mathbf{U}_k^{*}\mathbf{A}=\Sigma_k\mathbf{V}_k^{*}$.
+The factors of an exact singular value decomposition have all three; computed factors have them only up to
+rounding, which is why the implementation checks them (Section~\ref{sec:pinv}). Let the Nullspace Network,
+with arbitrary weights $\theta$, reconstruct from a sinogram
+$\mathbf{y}'=\mathbf{A}\mathbf{x}^\dagger+\boldsymbol{\eta}+\boldsymbol{\delta}$ that carries measurement
+noise $\boldsymbol{\eta}$ and possibly a perturbation $\boldsymbol{\delta}$, so that
+$\hat{\mathbf{x}}=\mathbf{A}^{+}\mathbf{y}'+\mathbf{P}_{\mathcal{N}_\tau}N_\theta(\mathbf{A}^{+}\mathbf{y}')$.
+Measuring a reconstruction and keeping the retained readings means applying
+$\mathbf{P}_k\mathbf{A}=\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}$. Applied to the network term this gives zero,
+since $\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}=\mathbf{U}_k\Sigma_k(\mathbf{V}_k^{*}-\mathbf{V}_k^{*}\mathbf{V}_k\mathbf{V}_k^{*})=0$,
+and applied to the initial reconstruction it returns the retained data, since
+$\mathbf{P}_k\mathbf{A}\mathbf{A}^{+}=\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}\mathbf{V}_k\Sigma_k^{-1}\mathbf{U}_k^{*}=\mathbf{P}_k$.
+Whatever the weights, therefore,
+\begin{equation}\label{eq:dc}
+\mathbf{P}_k\mathbf{A}\hat{\mathbf{x}}=\mathbf{P}_k\mathbf{y}'.
+\end{equation}
+This is the sense in which the Nullspace Network is data consistent: measuring its output reproduces
 the \emph{retained} measurements exactly. It says nothing about the discarded ones,
 $(\mathbf{I}-\mathbf{P}_k)\mathbf{A}=\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}\neq0$, and
-Section~\ref{sec:metrics} measures the residual there as well. Part (b) is the \emph{range floor}: the range
-component of the error of the Nullspace Network is that of the initial reconstruction, the amplified noise
-and perturbation, whatever the weights. An error that produces nonzero retained measurements can therefore
-never be corrected by the network. The residual network has the capacity to correct this component; whether
-it does is an empirical question, answered in Section~\ref{sec:results-perf}.\\
+Section~\ref{sec:metrics} measures the residual there as well.\\
+The same three properties fix the range component of the error. The projector onto the range,
+$\mathbf{I}-\mathbf{P}_{\mathcal{N}_\tau}=\mathbf{V}_k\mathbf{V}_k^{*}$, removes the network term and leaves
+$\mathbf{A}^{+}\mathbf{y}'$ unchanged, since that already lies in $\operatorname{range}(\mathbf{V}_k)$, and
+$\mathbf{A}^{+}\mathbf{A}=\mathbf{V}_k\Sigma_k^{-1}\mathbf{U}_k^{*}\mathbf{A}=\mathbf{V}_k\mathbf{V}_k^{*}$.
+Inserting $\mathbf{y}'$ gives
+\begin{equation}\label{eq:floor}
+(\mathbf{I}-\mathbf{P}_{\mathcal{N}_\tau})(\hat{\mathbf{x}}-\mathbf{x}^\dagger)
+=\mathbf{V}_k\mathbf{V}_k^{*}\mathbf{x}^\dagger+\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})-\mathbf{V}_k\mathbf{V}_k^{*}\mathbf{x}^\dagger
+=\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta}).
+\end{equation}
+We call this the \emph{range floor}: the range component of the error of the Nullspace Network is that of
+the initial reconstruction, the amplified noise and perturbation, whatever the weights. An error that
+produces nonzero retained measurements can therefore never be corrected by the network. The residual
+network has the capacity to correct this component; whether it does is an empirical question, answered in
+Section~\ref{sec:results-perf}.\\
 The projection decomposes the space of reconstructions into $\mathcal{N}_\tau$ and its complement $\mathcal{N}_\tau^\perp$.
 We call the two subspaces the null-space \emph{channel} and the range \emph{channel} of the error.
 The decomposition is used both to analyse our attacks and to construct the new type of attack introduced in this work.
@@ -482,26 +479,18 @@ measurement only through $\mathbf{x}_\text{init}=\mathbf{A}^{+}\mathbf{y}$, and
 $\mathbf{A}^{+}=\mathbf{V}_k\Sigma_k^{-1}\mathbf{U}_k^{*}$ sees only the component of a sinogram in
 $S:=\operatorname{range}(\mathbf{U}_k)$. We therefore restrict the perturbation to $S$, which gives the
 feasible set $\mathcal{C}:=S\cap B_\varepsilon$, where $B_\varepsilon$ is now the ball of radius
-$\varepsilon$ about the origin. The restriction is not a matter of realism, since physically realisable
-perturbations would form a different set, but one of economy: it loses the attacker nothing.
-%TODO: Dont like the proposition wording
-\begin{proposition}[Restriction without loss]\label{prop:restrict}
-Assume (B1) that $\mathcal{F}_\theta(\mathbf{y})$ depends on $\mathbf{y}$ only through
-$\mathbf{U}_k^{*}\mathbf{y}$, and (B2) that $\mathbf{U}_k$ has orthonormal columns and
-$\mathbf{P}_k=\mathbf{U}_k\mathbf{U}_k^{*}$. Then for every loss $\mathcal{L}$, the supremum of
-$\mathcal{L}(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}),\mathbf{x}^\dagger)$ over
-$\lVert\boldsymbol{\delta}\rVert_2\leq\varepsilon$ equals its supremum over $\boldsymbol{\delta}\in\mathcal{C}$.
-\end{proposition}
-\begin{proof}
-``$\geq$'' holds since $\mathcal{C}\subset B_\varepsilon$. For ``$\leq$'' take any $\boldsymbol{\delta}$ with
-$\lVert\boldsymbol{\delta}\rVert_2\leq\varepsilon$ and set $\boldsymbol{\delta}':=\mathbf{P}_k\boldsymbol{\delta}\in S$.
-By (B2), $\mathbf{P}_k$ is an orthogonal projector, so $\lVert\boldsymbol{\delta}'\rVert_2\leq\lVert\boldsymbol{\delta}\rVert_2\leq\varepsilon$
-and $\boldsymbol{\delta}'\in\mathcal{C}$. Again by (B2), $\mathbf{U}_k^{*}\mathbf{P}_k=\mathbf{U}_k^{*}$, so
-$\mathbf{U}_k^{*}(\mathbf{y}+\boldsymbol{\delta}')=\mathbf{U}_k^{*}(\mathbf{y}+\boldsymbol{\delta})$, and by (B1) both
-perturbations give the same reconstruction and the same loss. Every value attained on the ball is thus
-attained on $\mathcal{C}$.
-\end{proof}
-\noindent
+$\varepsilon$ about the origin. The restriction loses the attacker nothing. The
+reconstruction depends on the sinogram only through $\mathbf{U}_k^{*}\mathbf{y}$, and since $\mathbf{U}_k$ has
+orthonormal columns, $\mathbf{U}_k^{*}\mathbf{P}_k=\mathbf{U}_k^{*}$. A perturbation $\boldsymbol{\delta}$ from
+the ball and its projection $\mathbf{P}_k\boldsymbol{\delta}$ onto $S$ therefore give the same reconstruction
+%TODO: The projection is no longer than delta?
+and the same loss, and the projection, being orthogonal, is no longer than $\boldsymbol{\delta}$, so it lies in
+$\mathcal{C}$. Every value of the loss an attacker can reach on the ball is thus reached on $\mathcal{C}$ as
+well, and since $\mathcal{C}$ is part of the ball, the converse holds trivially. For every loss $\mathcal{L}$,
+\begin{equation}\label{eq:restrict}
+\sup_{\lVert\boldsymbol{\delta}\rVert_2\leq\varepsilon}\mathcal{L}\bigl(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}),\mathbf{x}^\dagger\bigr)
+=\sup_{\boldsymbol{\delta}\in\mathcal{C}}\mathcal{L}\bigl(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}),\mathbf{x}^\dagger\bigr).
+\end{equation}
 The argument fails for any method that also reads $(\mathbf{I}-\mathbf{P}_k)\mathbf{y}$, which is why a
 residual on the discarded readings can see what the reconstruction cannot (Section~\ref{sec:metrics}).
 It is convenient to write
@@ -518,25 +507,22 @@ iterations therefore produce the same sinograms, and the update rule becomes
 \[\boldsymbol{\delta}_{n+1}:=\Pi_{\mathcal{C}}\left( \boldsymbol{\delta}_n+\alpha\frac{\mathbf{g}_n}{\lVert\mathbf{g}_n\rVert_2}\right),\qquad \mathbf{g}_n:=\nabla_{\boldsymbol{\delta}}\mathcal{L}\!\left(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}),\,\mathbf{x}^\dagger\right)\Big|_{\boldsymbol{\delta}=\boldsymbol{\delta}_n},\]
 with the starting point $\boldsymbol{\delta}_0$ drawn at random from $\mathcal{C}$. The projection onto
 $\mathcal{C}$ is the composition of two simple projections, which is not true of intersections in general;
-it holds here because the ball is centred at $0\in S$, which is what the $\boldsymbol{\delta}$-coordinates provide.
-\begin{lemma}[Projection onto $\mathcal{C}$]\label{lem:proj}
-Assume (A1) that $\mathbf{P}$ is the orthogonal projector onto a subspace $S$, and (A2) that
-$B_\varepsilon$ is the closed ball of radius $\varepsilon$ centred at $0\in S$. Then
-$\Pi_{S\cap B_\varepsilon}(\boldsymbol{\delta})=\Pi_{B_\varepsilon}(\mathbf{P}\boldsymbol{\delta})$, where
-$\Pi_{B_\varepsilon}(\mathbf{v})=\mathbf{v}\min(1,\varepsilon/\lVert\mathbf{v}\rVert_2)$.
-\end{lemma}
-\begin{proof}
-Let $\mathbf{z}\in S\cap B_\varepsilon$. Then $\mathbf{P}\boldsymbol{\delta}-\mathbf{z}\in S$, and
-$(\mathbf{I}-\mathbf{P})\boldsymbol{\delta}\perp S$ by (A1); for an oblique projector this would fail. By
-Pythagoras, $\lVert\boldsymbol{\delta}-\mathbf{z}\rVert^2=\lVert(\mathbf{I}-\mathbf{P})\boldsymbol{\delta}\rVert^2
-+\lVert\mathbf{P}\boldsymbol{\delta}-\mathbf{z}\rVert^2$, and only the second term depends on $\mathbf{z}$.
-Over all of $B_\varepsilon$ it is minimised by the radial point $\mathbf{w}=\Pi_{B_\varepsilon}(\mathbf{P}\boldsymbol{\delta})$,
-a multiple of $\mathbf{P}\boldsymbol{\delta}$ and hence in $S$. This uses (A2): for a ball centred off $S$ the
-radial point could leave $S$. So $\mathbf{w}\in S\cap B_\varepsilon$ minimises over a superset of
-$S\cap B_\varepsilon$ and therefore over $S\cap B_\varepsilon$; it is the unique minimiser, since the
-squared distance is strictly convex.
-\end{proof}
-\noindent
+%TODO: Look at this in pdf
+it holds here because the ball is centred at $0\in S$, which is what the $\boldsymbol{\delta}$-coordinates
+provide. Take any point $\mathbf{z}$ of $S\cap B_\varepsilon$. Then
+$\mathbf{P}_k\boldsymbol{\delta}-\mathbf{z}$ lies in $S$ and $(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\delta}$ is
+orthogonal to $S$, so by Pythagoras
+$\lVert\boldsymbol{\delta}-\mathbf{z}\rVert^2=\lVert(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\delta}\rVert^2+\lVert\mathbf{P}_k\boldsymbol{\delta}-\mathbf{z}\rVert^2$,
+and only the second term depends on $\mathbf{z}$. Over the whole ball this term is smallest at the radial
+point $\Pi_{B_\varepsilon}(\mathbf{P}_k\boldsymbol{\delta})$, a multiple of $\mathbf{P}_k\boldsymbol{\delta}$ and
+hence a point of $S$. This is where the centre of the ball matters: for a ball centred off $S$ the radial
+point could leave $S$. A point of $S\cap B_\varepsilon$ that is closest to $\boldsymbol{\delta}$ among all
+points of the ball is closest among those of $S\cap B_\varepsilon$ as well, and it is the only such point,
+since the squared distance is strictly convex. The projection onto the feasible set is therefore
+\begin{equation}\label{eq:proj}
+\Pi_{\mathcal{C}}(\boldsymbol{\delta})=\Pi_{B_\varepsilon}(\mathbf{P}_k\boldsymbol{\delta}),
+\qquad \Pi_{B_\varepsilon}(\mathbf{v})=\mathbf{v}\min\bigl(1,\varepsilon/\lVert\mathbf{v}\rVert_2\bigr).
+\end{equation}
 This is the blueprint for every attack we use to test the robustness of our models;
 the attacks differ only in the choice of the loss $\mathcal{L}$. The basic choice is the squared norm of
 the total reconstruction error,
@@ -574,32 +560,29 @@ component as well, so restricting the attack to it compares the two networks on 
 The range attack serves as a control. Against the residual U-Net it shows how far a small perturbation
 can move the measured part of the reconstruction. Against the Nullspace Network it can only ever attack the
 pseudoinverse, and there the problem is simple enough to be solved exactly, which gives a certificate of
-how much the gradient ascent leaves on the table.
-\begin{proposition}[The range attack on the Nullspace Network]\label{prop:trs}
-Assume (P1)--(P3) of Proposition~\ref{prop:floor} and $\boldsymbol{\delta}\in\mathcal{C}$, and write
-$\mathbf{b}:=\mathbf{U}_k^{*}\boldsymbol{\eta}$, $\mathbf{c}:=\mathbf{U}_k^{*}\boldsymbol{\delta}$ and
-$\mathbf{D}:=\operatorname{diag}(\sigma_1^{-2},\dots,\sigma_k^{-2})$. Then the range attack on the
-Nullspace Network is the trust-region subproblem
-\[\max_{\lVert\mathbf{c}\rVert_2\leq\varepsilon}\;(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c}),\]
-and $\mathbf{c}$ is a global maximiser exactly when $(\lambda\mathbf{I}-\mathbf{D})\mathbf{c}=\mathbf{D}\mathbf{b}$ and
-$\lVert\mathbf{c}\rVert_2=\varepsilon$ for some $\lambda\geq\sigma_k^{-2}$.
-\end{proposition}
-\begin{proof}
-By Proposition~\ref{prop:floor}(b), which needs (P1)--(P3), the range component of the error is
-$\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})=\mathbf{V}_k\Sigma_k^{-1}(\mathbf{b}+\mathbf{c})$,
-and since $\mathbf{V}_k$ has orthonormal columns (P1) its squared norm is
-$(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c})$. Because $\mathbf{U}_k$ has orthonormal
-columns (P1), $\boldsymbol{\delta}\mapsto\mathbf{U}_k^{*}\boldsymbol{\delta}$ is an isometry of
-$S=\operatorname{range}(\mathbf{U}_k)$ onto $\mathbb{R}^k$, so $\boldsymbol{\delta}\in\mathcal{C}$ exactly when
-$\lVert\mathbf{c}\rVert_2\leq\varepsilon$. By the characterisation of Moré and Sorensen
-\parencite{more1983trust}, $\mathbf{c}$ minimises $-(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c})$
-over the ball exactly when there is a $\lambda\geq0$ with $(\lambda\mathbf{I}-\mathbf{D})\mathbf{c}=\mathbf{D}\mathbf{b}$,
+how much the gradient ascent leaves on the table.\\
+%TODO: Look at this in pdf
+By the range floor~\eqref{eq:floor}, a perturbation $\boldsymbol{\delta}\in\mathcal{C}$ leaves the Nullspace
+Network with the range error
+$\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})=\mathbf{V}_k\Sigma_k^{-1}(\mathbf{b}+\mathbf{c})$, where
+$\mathbf{b}:=\mathbf{U}_k^{*}\boldsymbol{\eta}$ and $\mathbf{c}:=\mathbf{U}_k^{*}\boldsymbol{\delta}$ are the
+coefficients of the noise and of the perturbation in the retained directions. Since $\mathbf{V}_k$ has
+orthonormal columns, the squared norm of this error is $(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c})$
+with $\mathbf{D}:=\operatorname{diag}(\sigma_1^{-2},\dots,\sigma_k^{-2})$. Since $\mathbf{U}_k$ has orthonormal
+columns as well, $\boldsymbol{\delta}\mapsto\mathbf{U}_k^{*}\boldsymbol{\delta}$ maps
+$S=\operatorname{range}(\mathbf{U}_k)$ isometrically onto $\mathbb{R}^k$, and $\boldsymbol{\delta}$ lies in
+$\mathcal{C}$ exactly when $\lVert\mathbf{c}\rVert_2\leq\varepsilon$. The range attack on the Nullspace Network
+is therefore the trust-region subproblem
+\begin{equation}\label{eq:trs}
+\max_{\lVert\mathbf{c}\rVert_2\leq\varepsilon}\;(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c}),
+\end{equation}
+whose global solutions Moré and Sorensen characterise \parencite{more1983trust}. Written as the minimisation
+of $-(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c})$ over the ball, $\mathbf{c}$ is a solution exactly
+when there is a $\lambda\geq0$ with $(\lambda\mathbf{I}-\mathbf{D})\mathbf{c}=\mathbf{D}\mathbf{b}$,
 $\lambda\mathbf{I}-\mathbf{D}$ positive semidefinite and $\lambda(\varepsilon-\lVert\mathbf{c}\rVert_2)=0$. The
 second condition forces $\lambda\geq\max_i\sigma_i^{-2}=\sigma_k^{-2}>0$, and the third then
-$\lVert\mathbf{c}\rVert_2=\varepsilon$.
-\end{proof}
-\noindent
-For $\lambda>\sigma_k^{-2}$ the norm of $\mathbf{c}(\lambda)=(\lambda\mathbf{I}-\mathbf{D})^{-1}\mathbf{D}\mathbf{b}$
+$\lVert\mathbf{c}\rVert_2=\varepsilon$: the worst perturbation always spends the whole budget. For
+$\lambda>\sigma_k^{-2}$ the norm of $\mathbf{c}(\lambda)=(\lambda\mathbf{I}-\mathbf{D})^{-1}\mathbf{D}\mathbf{b}$
 decreases strictly to zero, so $\lambda$ is found by bisection; if $b_k=0$ the norm may stay below
 $\varepsilon$ as $\lambda\to\sigma_k^{-2}$, and the remaining length is spent along $\mathbf{e}_k$ (the ``hard
 case''). We evaluate this exact maximum for every attacked sample (Section~\ref{sec:adversarial}).
@@ -1129,21 +1112,16 @@ The projection sits inside the computational graph and not after it.
 At inference this would make no difference to the form of the map, since projecting the correction of a
 trained residual network would also give a data-consistent map. During training, however,
 it matters. Write $\mathbf{r}=N_\theta(\mathbf{x}_\text{init})$ for the raw network output, so that
-$\hat{\mathbf{x}}=\mathbf{x}_\text{init}+\mathbf{P}_{\mathcal{N}_\tau}\mathbf{r}$.
-\begin{proposition}[Gradient invisibility of the range floor]\label{prop:grad}
-Assume (G1) that $\mathbf{P}_{\mathcal{N}_\tau}$ is an orthogonal projector and (G2) that the loss is the
-training objective $\mathcal{L}(\hat{\mathbf{x}})=\frac1n\lVert\hat{\mathbf{x}}-\mathbf{x}^\dagger\rVert_2^2$.
-Then $\nabla_{\!\mathbf{r}}\mathcal{L}=\frac2n\,\mathbf{e}_{\mathcal{N}}$.
-\end{proposition}
-\begin{proof}
-By (G2), $\nabla_{\!\hat{\mathbf{x}}}\mathcal{L}=\frac2n(\hat{\mathbf{x}}-\mathbf{x}^\dagger)=\frac2n\mathbf{e}$.
-$\hat{\mathbf{x}}$ depends on $\mathbf{r}$ only through the linear map
-$\mathbf{r}\mapsto\mathbf{P}_{\mathcal{N}_\tau}\mathbf{r}$, whose Jacobian is the projector, so the chain
-rule gives $\nabla_{\!\mathbf{r}}\mathcal{L}=\mathbf{P}_{\mathcal{N}_\tau}^{*}\nabla_{\!\hat{\mathbf{x}}}\mathcal{L}$.
-By (G1), $\mathbf{P}_{\mathcal{N}_\tau}^{*}=\mathbf{P}_{\mathcal{N}_\tau}$, and
-$\mathbf{P}_{\mathcal{N}_\tau}\mathbf{e}=\mathbf{e}_{\mathcal{N}}$ by definition.
-\end{proof}
-\noindent
+%TODO: Look at this in pdf
+$\hat{\mathbf{x}}=\mathbf{x}_\text{init}+\mathbf{P}_{\mathcal{N}_\tau}\mathbf{r}$. The training objective
+$\mathcal{L}(\hat{\mathbf{x}})=\frac1n\lVert\hat{\mathbf{x}}-\mathbf{x}^\dagger\rVert_2^2$ has the gradient
+$\nabla_{\!\hat{\mathbf{x}}}\mathcal{L}=\frac2n\mathbf{e}$, and the reconstruction depends on $\mathbf{r}$ only
+through the linear map $\mathbf{r}\mapsto\mathbf{P}_{\mathcal{N}_\tau}\mathbf{r}$, whose Jacobian is the
+projector itself. An orthogonal projector is symmetric, so the chain rule gives
+\begin{equation}\label{eq:grad}
+\nabla_{\!\mathbf{r}}\mathcal{L}=\mathbf{P}_{\mathcal{N}_\tau}^{*}\nabla_{\!\hat{\mathbf{x}}}\mathcal{L}
+=\tfrac2n\,\mathbf{P}_{\mathcal{N}_\tau}\mathbf{e}=\tfrac2n\,\mathbf{e}_{\mathcal{N}}.
+\end{equation}
 What reaches the U-Net output is therefore the null-space component of the error alone: the range floor
 is not merely uncorrectable at inference, it is invisible to training. Whatever the loss would like to change
 about the component of $\mathbf{r}$ in ${\mathcal{N}_\tau}^{\perp}$, no
@@ -1151,7 +1129,7 @@ gradient signal to that effect ever reaches the weights.
 The Nullspace Network is thus never rewarded for producing a correction in ${\mathcal{N}_\tau}^{\perp}$,
 which would be discarded anyway. The capacity that a post-hoc variant would spend on learning such a correction
 is, in our architecture, spent entirely inside $\mathcal{N}_\tau$.\\
-The data consistency of Proposition~\ref{prop:floor}(a) is checked numerically against the real operator by
+The data consistency~\eqref{eq:dc} is checked numerically against the real operator by
 the test suite of Section~\ref{sec:pipeline}, which asserts
 $\mathbf{P}_k\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}=0$, not $\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}=0$. The
 check is made with untrained weights and holds for any weights, because the property is one of the
@@ -1173,8 +1151,8 @@ This way neither the budget, the step size, the starting points nor the projecti
 between the two architectures. Any difference in the reported numbers is a difference of architecture.\\
 The first arrow also applies to the clean sinogram: what is attacked is $\mathbf{P}_k\mathbf{y}^\delta$
 rather than the $\mathbf{y}^\delta$ written to disk. This changes nothing about the network input, since
-$\mathbf{A}^{+}$ annihilates the component the projection removes, and nothing about the strength of the
-attack (Proposition~\ref{prop:restrict}).\\\\
+$\mathbf{A}^{+}$ annihilates the component the projection removes, and by~\eqref{eq:restrict} nothing about
+the strength of the attack.\\\\
 \textbf{Budget.} The budget is per sample and equals the part of the noise that reaches the reconstruction,
 \[\varepsilon_i=\kappa\,\lVert\mathbf{P}_k\boldsymbol{\eta}_i\rVert_2,
 \qquad \boldsymbol{\eta}_i=\mathbf{y}^\delta_i-\mathbf{A}\mathbf{x}^\dagger_i,\qquad \kappa=1\]
@@ -1191,7 +1169,8 @@ $\boldsymbol{\delta}=-\mathbf{P}_k\boldsymbol{\eta}_i$ is feasible: the attack b
 $\mathbf{P}_k\mathbf{y}^\delta_i$ contains the noise-free retained data $\mathbf{P}_k\mathbf{A}\mathbf{x}^\dagger_i$,
 and an attacker can always remove the noise the reconstruction receives (Section~\ref{sec:results-targeted}).
 And since the noise draws are shared between the noise levels, the budget scales exactly with
-$\sigma_\text{rel}$ (Proposition~\ref{prop:linear}).\\\\
+$\sigma_\text{rel}$, and with it the worst damage to the range component (equation~\eqref{eq:linear} in
+Section~\ref{sec:results-general}).\\\\
 \textbf{Step size, restarts and iterates.} The step size is derived from the budget, per sample and in
 the same units,
 \[\alpha_i = \frac{2.5\,\varepsilon_i}{T},\qquad T=50,\]
@@ -1210,8 +1189,8 @@ Too weak an attack makes a model look more robust than it is, and evaluations wi
 untuned attack are known to overestimate robustness for this reason \parencite{croce2020reliable}.
 Two restarts of $50$ steps are a modest safeguard, and the attacked errors are lower bounds on what an
 attacker can do. Three references say how far from the worst case they are. For the range component of
-the Nullspace Network the worst case is computed exactly, as the trust-region problem of
-Proposition~\ref{prop:trs}, for every attacked sample, and set against what the total-error and the range
+the Nullspace Network the worst case is computed exactly, as the trust-region problem~\eqref{eq:trs}, for
+every attacked sample, and set against what the total-error and the range
 attack reach. A random direction of $\operatorname{range}(\mathbf{U}_k)$ at the full budget, that is, a
 second noise draw of the received size, shows how much of the damage is due to the direction rather than
 the size of the perturbation. And the null-space attack is repeated on $64$ samples at the budgets
@@ -1219,7 +1198,7 @@ $\kappa\in\{1/4,1/2,1,2,4\}$. Gradient masking \parencite{athalye2018obfuscated}
 reconstruction maps are compositions of matrix products and a ReLU network with max pooling, piecewise
 linear and differentiable almost everywhere, with no randomisation and no iterative solver, so the
 gradient the attack follows is the gradient of the map it attacks wherever that exists.\\\\
-\textbf{Feasible set.} By Lemma~\ref{lem:proj}, the projection onto
+\textbf{Feasible set.} By~\eqref{eq:proj}, the projection onto
 $\mathcal{C}=\operatorname{range}(\mathbf{U}_k)\cap B_{\varepsilon_i}$ is
 $\Pi_{B_{\varepsilon_i}}(\mathbf{P}_k\boldsymbol{\delta})$, applied per sample. The implementation applies
 $\mathbf{P}_k$ once more afterwards. Mathematically this is redundant, but without it the component that
@@ -1423,30 +1402,25 @@ $\mathbf{P}_k\boldsymbol{\delta}$, the triangle inequality gives
 \;\leq\;\lVert\boldsymbol{\delta}\rVert_2 ,\]
 so after normalisation the two residuals differ by at most the relative budget. This bounds only their
 difference, not the residuals themselves. For the Nullspace Network both values are known in advance: by
-Proposition~\ref{prop:floor}(a) the first residual is zero up to rounding, whatever the attack does, and
+the data consistency~\eqref{eq:dc} the first residual is zero up to rounding, whatever the attack does, and
 the second is then just the relative size of the perturbation,
 $\lVert\boldsymbol{\delta}\rVert_2/\lVert\mathbf{P}_k\mathbf{y}^\delta\rVert_2$. For the residual U-Net
 nothing ties the output to the data, so both residuals have to be measured.\\
 The residual on the retained readings is blind to the null space by construction. We therefore also
 record the residual on all measured readings, $\lVert\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}^\delta-\boldsymbol{\delta}\rVert_2/\lVert\mathbf{y}^\delta\rVert_2$,
-and its part on the readings the truncation discards.
-\begin{proposition}[What the discarded readings see]\label{prop:disc}
-Assume (P1) of Proposition~\ref{prop:floor}, $\mathbf{y}^\delta=\mathbf{A}\mathbf{x}^\dagger+\boldsymbol{\eta}$ and
-$\boldsymbol{\delta}\in\operatorname{range}(\mathbf{U}_k)$. Then every reconstruction $\hat{\mathbf{x}}$ with
-error $\mathbf{e}=\hat{\mathbf{x}}-\mathbf{x}^\dagger$ satisfies
-\[(\mathbf{I}-\mathbf{P}_k)(\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}^\delta-\boldsymbol{\delta})
+%TODO: Look at this in pdf
+and its part on the readings the truncation discards. What that part sees follows from the singular value
+decomposition, by which $(\mathbf{I}-\mathbf{P}_k)\mathbf{A}$ and $\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}$ are the
+same operator, $\sum_{i>k}\sigma_i\mathbf{u}_i\mathbf{v}_i^{*}$, of norm $\sigma_{k+1}$. The perturbation lies in
+$\operatorname{range}(\mathbf{U}_k)$ and has no discarded part, so for every reconstruction $\hat{\mathbf{x}}$
+of $\mathbf{y}^\delta=\mathbf{A}\mathbf{x}^\dagger+\boldsymbol{\eta}$, attacked or not, with error
+$\mathbf{e}=\hat{\mathbf{x}}-\mathbf{x}^\dagger$,
+\begin{equation}\label{eq:disc}
+(\mathbf{I}-\mathbf{P}_k)(\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}^\delta-\boldsymbol{\delta})
 =\mathbf{A}\mathbf{e}_{\mathcal{N}}-(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\eta},
-\qquad \lVert\mathbf{A}\mathbf{e}_{\mathcal{N}}\rVert_2\leq\sigma_{k+1}\lVert\mathbf{e}_{\mathcal{N}}\rVert_2 .\]
-\end{proposition}
-\begin{proof}
-$(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\delta}=0$ since $\boldsymbol{\delta}\in\operatorname{range}(\mathbf{P}_k)$. By
-(P1), $(\mathbf{I}-\mathbf{P}_k)\mathbf{A}$ and $\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}$ both equal
-$\sum_{i>k}\sigma_i\mathbf{u}_i\mathbf{v}_i^{*}$, so
-$(\mathbf{I}-\mathbf{P}_k)(\mathbf{A}\hat{\mathbf{x}}-\mathbf{A}\mathbf{x}^\dagger)=\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}\mathbf{e}=\mathbf{A}\mathbf{e}_{\mathcal{N}}$,
-and the norm of $\sum_{i>k}\sigma_i\mathbf{u}_i\mathbf{v}_i^{*}$ is $\sigma_{k+1}$.
-\end{proof}
-\noindent
-For the ground truth the residual on the discarded readings is the discarded noise,
+\qquad \lVert\mathbf{A}\mathbf{e}_{\mathcal{N}}\rVert_2\leq\sigma_{k+1}\lVert\mathbf{e}_{\mathcal{N}}\rVert_2 .
+\end{equation}
+For the ground truth the residual on the discarded readings is therefore the discarded noise,
 $\lVert(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\eta}\rVert_2\approx\sqrt{(m-k)/m}\,\sigma_\text{rel}\lVert\mathbf{y}\rVert_2$,
 and a null-space error moves it by at most $\sigma_{k+1}\lVert\mathbf{e}_\mathcal{N}\rVert_2$. Morozov's
 discrepancy principle \parencite{morozov1966} judges a reconstruction by whether its residual is of the
@@ -1536,22 +1510,21 @@ factor $\sigma_{\max}/\sigma_k\leq1/\tau$. Both are still local, gains of the li
 input, whereas an attack can take the input far from it. All five gains are estimated with $16$ power
 iterations at each of the first $32$ clean inputs of the attacked test samples; since they are strongly
 skewed over these points, their median is reported together with their maximum.
-For the Nullspace Network the gains are related by a bound that serves as a check.
-\begin{proposition}[Splitting the gain of a null-space correction]\label{prop:split}
-Assume (L1) that the correction lies in $\mathcal{N}_\tau$, so $\mathbf{J}:=\mathbf{J}_g(\mathbf{x}_0)=\mathbf{P}_{\mathcal{N}_\tau}\mathbf{J}$,
-and (L2) that $\mathbf{P}_{\mathcal{N}_\tau}$ is an orthogonal projector. With $a$ and $c$ the
-null-restricted and the cross gain,
-$\max(a,c)\leq\lVert\mathbf{J}\rVert_2\leq\sqrt{a^2+c^2}$.
-\end{proposition}
-\begin{proof}
-Write $\mathbf{P}=\mathbf{P}_{\mathcal{N}_\tau}$. By (L1), $\mathbf{J}=\mathbf{J}\mathbf{P}+\mathbf{J}(\mathbf{I}-\mathbf{P})$
-with $\lVert\mathbf{J}\mathbf{P}\rVert_2=a$ and $\lVert\mathbf{J}(\mathbf{I}-\mathbf{P})\rVert_2=c$. Since
-$\lVert\mathbf{P}\rVert_2,\lVert\mathbf{I}-\mathbf{P}\rVert_2\leq1$ by (L2), $a,c\leq\lVert\mathbf{J}\rVert_2$.
-For a unit vector $\mathbf{d}$, (L2) splits it orthogonally into $\mathbf{P}\mathbf{d}$ and
-$(\mathbf{I}-\mathbf{P})\mathbf{d}$ with squared norms summing to one, so by the triangle and the
-Cauchy--Schwarz inequality $\lVert\mathbf{J}\mathbf{d}\rVert_2\leq a\lVert\mathbf{P}\mathbf{d}\rVert_2+c\lVert(\mathbf{I}-\mathbf{P})\mathbf{d}\rVert_2\leq\sqrt{a^2+c^2}$.
-\end{proof}
-\noindent
+%TODO: Look at this in pdf
+For the Nullspace Network the gains are related by a bound that serves as a check. Its correction lies in
+$\mathcal{N}_\tau$, so its Jacobian $\mathbf{J}:=\mathbf{J}_g(\mathbf{x}_0)$ satisfies
+$\mathbf{J}=\mathbf{P}_{\mathcal{N}_\tau}\mathbf{J}$. Writing $\mathbf{P}:=\mathbf{P}_{\mathcal{N}_\tau}$, it
+splits into $\mathbf{J}=\mathbf{J}\mathbf{P}+\mathbf{J}(\mathbf{I}-\mathbf{P})$, the null-restricted part, of
+norm $a$, and the cross part, of norm $c$. Neither part is larger than $\mathbf{J}$, since neither
+$\mathbf{P}$ nor $\mathbf{I}-\mathbf{P}$ has a norm above one. Conversely, a unit vector $\mathbf{d}$ splits
+orthogonally into $\mathbf{P}\mathbf{d}$ and $(\mathbf{I}-\mathbf{P})\mathbf{d}$, whose squared norms sum to
+one, and the triangle and the Cauchy--Schwarz inequality give
+$\lVert\mathbf{J}\mathbf{d}\rVert_2\leq a\lVert\mathbf{P}\mathbf{d}\rVert_2+c\lVert(\mathbf{I}-\mathbf{P})\mathbf{d}\rVert_2\leq\sqrt{a^2+c^2}$.
+The unrestricted gain of the Nullspace Network is thus bounded from below and from above by its
+null-restricted gain $a$ and its cross gain $c$,
+\begin{equation}\label{eq:split}
+\max(a,c)\;\leq\;\lVert\mathbf{J}\rVert_2\;\leq\;\sqrt{a^2+c^2}.
+\end{equation}
 Equality in the upper bound needs the worst directions of both parts to be mapped onto the same output
 direction, in the proportion $a:c$, so a Jacobian close to it is close to rank one at that point.
 
@@ -1650,7 +1623,7 @@ The reason is that $\mathbf{x}_\text{init}=\mathbf{A}^{+}\mathbf{y}^\delta$ lies
 $\mathbf{P}_{\mathcal{N}_\tau}(\mathbf{x}_\text{init}-\mathbf{x}^\dagger)=-\mathbf{P}_{\mathcal{N}_\tau}\mathbf{x}^\dagger$:
 this component is the part of the phantom the truncated reconstruction does not use, and the noise cannot
 reach it. The four datasets share their phantoms, so the value is identical to every digit printed.
-Conversely, by Proposition~\ref{prop:floor}(b) with $\boldsymbol{\delta}=0$, the range component of the
+Conversely, by the range floor~\eqref{eq:floor} with $\boldsymbol{\delta}=0$, the range component of the
 pseudoinverse error is the amplified received noise $\mathbf{A}^{+}\boldsymbol{\eta}=\mathbf{A}^{+}\mathbf{P}_k\boldsymbol{\eta}$
 and nothing else. The four datasets share their noise draws as well, which are only rescaled, so the range
 component grows exactly in proportion to $\sigma_\text{rel}$, from $0.1029$ at $\sigma_\text{rel}=0.005$
@@ -1698,7 +1671,7 @@ it five- to elevenfold.
 Data consistency thus certifies that a reconstruction explains its retained data, but not that these
 data are the ones the scanner produced, and it says nothing about the null-space component of the image,
 which the retained measurements do not constrain. The discarded measurements do, weakly: by
-Proposition~\ref{prop:disc}, a null-space error $\mathbf{e}_\mathcal{N}$ moves the residual on the discarded
+\eqref{eq:disc}, a null-space error $\mathbf{e}_\mathcal{N}$ moves the residual on the discarded
 readings by at most $\sigma_{k+1}\lVert\mathbf{e}_\mathcal{N}\rVert_2$, which at the reference threshold
 and an attacked null-space error of about $0.3\lVert\mathbf{x}^\dagger\rVert_2$ is below $0.4\%$ of
 $\lVert\mathbf{y}\rVert_2$, hidden in the discarded noise, but at $\tau=6.2\cdot10^{-2}$ up to about twice
@@ -1768,30 +1741,26 @@ $\mathbf{A}^{+}\boldsymbol{\delta}$ and by nothing else, and the total-error att
 grow that component.\\
 Because this component moves by $\mathbf{A}^{+}\boldsymbol{\delta}$ alone, its growth is determined by the
 pseudoinverse and the budget, and with the shared noise draws it scales exactly with the noise level.
-%TODO: Dont like this proposition thing!
-\begin{proposition}[Range growth scales with the noise level]\label{prop:linear}
-Assume (P1) of Proposition~\ref{prop:floor} and (C1) that the noise draws are shared between the noise
-levels and only rescaled, $\boldsymbol{\eta}=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\,\hat{\mathbf{g}}$ with a
-fixed unit vector $\hat{\mathbf{g}}$; (C2) that the budget is $\varepsilon=\kappa\lVert\mathbf{P}_k\boldsymbol{\eta}\rVert_2$.
-Then the largest growth of the range error over $\mathcal{C}$,
-$G^*:=\max_{\boldsymbol{\delta}\in\mathcal{C}}\lVert\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})\rVert_2-\lVert\mathbf{A}^{+}\boldsymbol{\eta}\rVert_2$,
-is $\sigma_\text{rel}\lVert\mathbf{y}\rVert_2$ times a number that does not depend on $\sigma_\text{rel}$,
-and $G^*\leq\varepsilon/\sigma_k$. If (C3) an attack reaches the same share of $G^*$ at every noise level,
-its growth is proportional to $\sigma_\text{rel}$ as well.
-\end{proposition}
-\begin{proof}
-By Proposition~\ref{prop:floor}(b), which needs (P1), the range error is
-$\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})$. Substitute
-$\boldsymbol{\delta}=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\,\mathbf{d}$: by (C1) and (C2) the constraint
-$\boldsymbol{\delta}\in\mathcal{C}$ becomes $\mathbf{d}\in\operatorname{range}(\mathbf{U}_k)$,
-$\lVert\mathbf{d}\rVert_2\leq\kappa\lVert\mathbf{P}_k\hat{\mathbf{g}}\rVert_2$, a set that does not depend on
-$\sigma_\text{rel}$, and by linearity of $\mathbf{A}^{+}$ the growth becomes
-$\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\,(\lVert\mathbf{A}^{+}(\hat{\mathbf{g}}+\mathbf{d})\rVert_2-\lVert\mathbf{A}^{+}\hat{\mathbf{g}}\rVert_2)$.
-Its maximum over that set is the claimed number; with (C3) the same holds for the attack. The bound
-follows from the triangle inequality,
-$\lVert\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})\rVert_2-\lVert\mathbf{A}^{+}\boldsymbol{\eta}\rVert_2\leq\lVert\mathbf{A}^{+}\boldsymbol{\delta}\rVert_2\leq\varepsilon/\sigma_k$.
-\end{proof}
-\noindent
+%TODO: Look at this in pdf
+Let
+\[G^*:=\max_{\boldsymbol{\delta}\in\mathcal{C}}\lVert\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})\rVert_2-\lVert\mathbf{A}^{+}\boldsymbol{\eta}\rVert_2\]
+be the largest growth of the range error a perturbation within the budget can cause; it is what the
+trust-region problem~\eqref{eq:trs} computes. The noise draws are shared between the noise levels and only
+rescaled, $\boldsymbol{\eta}=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\,\hat{\mathbf{g}}$ with the same unit
+vector $\hat{\mathbf{g}}$ at every level (Section~\ref{sec:data}), and the budget is
+$\varepsilon=\kappa\lVert\mathbf{P}_k\boldsymbol{\eta}\rVert_2$. Writing the perturbation as
+$\boldsymbol{\delta}=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\,\mathbf{d}$ turns the constraint
+$\boldsymbol{\delta}\in\mathcal{C}$ into $\mathbf{d}\in\operatorname{range}(\mathbf{U}_k)$,
+$\lVert\mathbf{d}\rVert_2\leq\kappa\lVert\mathbf{P}_k\hat{\mathbf{g}}\rVert_2$, a set $\mathcal{D}$ that does not depend
+on $\sigma_\text{rel}$, and since $\mathbf{A}^{+}$ is linear,
+\begin{equation}\label{eq:linear}
+G^*=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\;\max_{\mathbf{d}\in\mathcal{D}}\Bigl(\lVert\mathbf{A}^{+}(\hat{\mathbf{g}}+\mathbf{d})\rVert_2-\lVert\mathbf{A}^{+}\hat{\mathbf{g}}\rVert_2\Bigr),
+\end{equation}
+$\sigma_\text{rel}\lVert\mathbf{y}\rVert_2$ times a factor that is the same at every noise level. An attack that
+reaches the same share of $G^*$ at every noise level therefore grows the range error in proportion to
+$\sigma_\text{rel}$ as well. By the triangle inequality, finally, the growth is never larger than
+$\lVert\mathbf{A}^{+}\boldsymbol{\delta}\rVert_2\leq\varepsilon/\sigma_k$, a bound that scales with $1/\tau$,
+since $\sigma_k\geq\tau\sigma_{\max}$.\\
 Linearity of $\mathbf{A}^{+}$ alone would not give this: with the noise held fixed and only the budget
 varying, the largest growth is not linear in the budget, its slope being about
 $\lVert\mathbf{B}^{*}\mathbf{a}\rVert_2/\lVert\mathbf{a}\rVert_2$ for small and $\lVert\mathbf{B}\rVert_2$ for large
@@ -1799,10 +1768,8 @@ budgets, where $\mathbf{a}=\mathbf{A}^{+}\boldsymbol{\eta}$ and $\mathbf{B}$ is 
 $\operatorname{range}(\mathbf{U}_k)$. Measured, the median growth, relative to
 $\lVert\mathbf{x}^\dagger\rVert_2$, is the same multiple of $\sigma_\text{rel}$, between $67.7$ and $68.0$,
 at all four noise levels at the reference threshold (Table~\ref{tab:prop}), and the total-error attack
-reaches between $96.8\%$ and $97.5\%$ of the exact largest growth $G^*$ of 
-%TODO: Adapt to missing proposition
-Proposition~\ref{prop:trs} in
-the median, the range attack $97.6\%$. The total-error attack against the
+reaches between $96.8\%$ and $97.5\%$ of the exact largest growth $G^*$ in the median, the range attack
+$97.6\%$. The total-error attack against the
 Nullspace Network thus mainly measures the pseudoinverse, and the gap to the exact worst case, about three
 percent, says how much a stronger optimiser could add. As a comparison of the two methods, the total error is meaningful: the
 Nullspace-Network method is markedly less robust in total error when $\tau$ is small, with a
@@ -1814,7 +1781,7 @@ null-space component.
 \caption{Total-error attack on the Nullspace Network in all $16$ runs, $N=128$: median growth
 $\lVert\mathbf{e}_{\mathcal{N}^\perp}(\boldsymbol{\delta})\rVert_2-\lVert\mathbf{e}_{\mathcal{N}^\perp}(0)\rVert_2$
 of the range error relative to $\lVert\mathbf{x}^\dagger\rVert_2$, the median of the exact largest growth
-$G^*$ (Propositions~\ref{prop:trs} and~\ref{prop:linear}), the median share of $G^*$ the attack reaches,
+$G^*$ (equations~\eqref{eq:trs} and~\eqref{eq:linear}), the median share of $G^*$ the attack reaches,
 and the median null-space fraction $\lVert\mathbf{e}_\mathcal{N}\rVert_2/\lVert\mathbf{e}\rVert_2$ of the
 attacked error. Within each block $\tau$ increases: $\tau=4.4\cdot10^{-4}$ and $\tau=6.2\cdot10^{-2}$ halve
 and double $\dim\mathcal{N}_\tau$ against the reference $\tau=4\cdot10^{-3}$, and the remaining threshold
@@ -2288,16 +2255,17 @@ Nullspace & 0.51 & 8.60 & $5.3\cdot10^{-8}$ & $1.1\cdot10^{-7}$ & 1.30 & 19.31 &
 \end{table}
 Two properties are known in advance and serve as checks, and both hold. First, the
 complement-restricted gain of the Nullspace Network is zero up to rounding, since its correction has no
-%TODO: Remove proposition references
-component in $\mathcal{N}_\tau^\perp$. Second, by Proposition~\ref{prop:split} its unrestricted gain lies
-between the larger of the null-restricted and the cross gain and the root of the sum of their squares.
-%TODO: Lower bound and upper bound?
-At all $32$ points the estimates respect the lower bound, and at $30$ the upper bound; at the other two the
-unrestricted estimate exceeds it by at most $0.023$, which the lower-bound character of the null-restricted
-and the cross estimate allows. In the median the cross gain alone accounts for $92\%$ of the unrestricted
-gain. All three maxima lie at the same point, and there the unrestricted gain sits at the upper bound,
-$\sqrt{8.60^2+17.29^2}=19.31$, which by the remark after Proposition~\ref{prop:split} points to a Jacobian
-close to rank one at the worst point. The correction of the Nullspace Network thus responds more than
+%TODO: Look at this in pdf
+component in $\mathcal{N}_\tau^\perp$. Second, by~\eqref{eq:split} its unrestricted gain can be neither
+smaller than the larger of its null-restricted gain $a$ and its cross gain $c$, the lower bound
+$\max(a,c)$, nor larger than the upper bound $\sqrt{a^2+c^2}$. The estimates respect the lower bound at all
+$32$ points and the upper bound at $30$. At the other two the unrestricted estimate exceeds
+$\sqrt{a^2+c^2}$ by at most $0.023$. This does not contradict~\eqref{eq:split}, which holds for the exact
+gains: the estimates of $a$ and $c$ are themselves lower bounds, and where their power iterations have not
+fully settled, the upper bound computed from them comes out slightly too small. In the median the cross
+gain alone accounts for $92\%$ of the unrestricted gain. All three maxima lie at the same point, and there
+the unrestricted gain sits at the upper bound, $\sqrt{8.60^2+17.29^2}=19.31$, which by the remark
+after~\eqref{eq:split} points to a Jacobian close to rank one at the worst point. The correction of the Nullspace Network thus responds more than
 twice as strongly to input perturbations in $\mathcal{N}_\tau^\perp$ as to those in
 $\mathcal{N}_\tau$. The power iterations of the Nullspace Network had settled to a relative change below
 $10^{-3}$ in their last step at $27$ to $32$ of the $32$ points, depending on the gain, and below
@@ -2462,8 +2430,8 @@ residual network remains $1.3$ to $5$ times more accurate. On the null-space com
 Table~\ref{tab:clean} persists at every threshold: the Nullspace Network has the lower clean null-space
 error, although only barely at $\sigma_\text{rel}=0.005$ and $\tau=5.6\cdot10^{-3}$.\\
 Under attack, the threshold sets the amplification of the pseudoinverse. The bound
-$\varepsilon/\sigma_k\leq\varepsilon/(\tau\sigma_{\max})$ of Proposition~\ref{prop:linear} on the growth of
-the range component scales with $1/\tau$, and as long as the total-error attack spends its budget on the range
+$\varepsilon/\sigma_k\leq\varepsilon/(\tau\sigma_{\max})$ on the growth of the range component
+(Section~\ref{sec:results-general}) scales with $1/\tau$, and as long as the total-error attack spends its budget on the range
 component, the median growth follows it (Table~\ref{tab:prop}). At $\tau=4.4\cdot10^{-4}$ it is
 $693\,\sigma_\text{rel}$ at every noise level, relative to $\lVert\mathbf{x}^\dagger\rVert_2$, which is
 $10.2$ times the $68\,\sigma_\text{rel}$ of the reference. The ratio $9.1$ of the two thresholds, times the
