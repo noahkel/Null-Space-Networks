@@ -341,7 +341,6 @@ The $2\times2$ max pooling halves the spatial resolution but leaves the number o
 The first convolution of the following block doubles the number of feature channels, in our
 implementation in every block but the last of the contracting path, which keeps its $512$ channels
 (Section~\ref{sec:training}).
-%TODO: Check channel implementation
 After the contracting path, the expansive path upsamples the data again; in the original U-Net this is a
 $2\times 2$ up-convolution that halves the number of feature channels, while our implementation uses
 bilinear upsampling, keeping the number of channels during the upsampling process.
@@ -482,8 +481,7 @@ $\varepsilon$ about the origin. The restriction loses the attacker nothing. The
 reconstruction depends on the sinogram only through $\mathbf{U}_k^{*}\mathbf{y}$, and since $\mathbf{U}_k$ has
 orthonormal columns, $\mathbf{U}_k^{*}\mathbf{P}_k=\mathbf{U}_k^{*}$. A perturbation $\boldsymbol{\delta}$ from
 the ball and its projection $\mathbf{P}_k\boldsymbol{\delta}$ onto $S$ therefore give the same reconstruction
-%TODO: The projection is no longer than delta?
-and the same loss, and the projection, being orthogonal, is no longer than $\boldsymbol{\delta}$, so it lies in
+and the same loss. Since the projection of the perturbation, being orthogonal, lies in
 $\mathcal{C}$. Every value of the loss an attacker can reach on the ball is thus reached on $\mathcal{C}$ as
 well, and since $\mathcal{C}$ is part of the ball, the converse holds trivially. For every loss $\mathcal{L}$,
 \begin{equation}\label{eq:restrict}
@@ -514,10 +512,9 @@ $\lVert\boldsymbol{\delta}-\mathbf{z}\rVert^2=\lVert(\mathbf{I}-\mathbf{P}_k)\bo
 and only the second term depends on $\mathbf{z}$. Over the whole ball this term is smallest at the radial
 point $\Pi_{B_\varepsilon}(\mathbf{P}_k\boldsymbol{\delta})$, a multiple of $\mathbf{P}_k\boldsymbol{\delta}$ and
 hence a point of $S$. 
-%TODO: I dont understand the following sentence
-A point of $S\cap B_\varepsilon$ that is closest to $\boldsymbol{\delta}$ among all
-points of the ball is closest among those of $S\cap B_\varepsilon$ as well, and it is the only such point,
-since the squared distance is strictly convex. The projection onto the feasible set is therefore
+A point of $S\cap B_\varepsilon$ that minimises the second term over the whole ball minimises it over $S\cap B_\varepsilon$ as well.
+On $S\cap B_\varepsilon$ this term differs from $\lVert\boldsymbol{\delta}-\mathbf{z}\rVert^2$ only by a constant, so the point is the projection of $\boldsymbol{\delta}$, and it is unique since the squared distance is strictly convex.
+The projection onto the feasible set is therefore
 \begin{equation}\label{eq:proj}
 \Pi_{\mathcal{C}}(\boldsymbol{\delta})=\Pi_{B_\varepsilon}(\mathbf{P}_k\boldsymbol{\delta}),
 \qquad \Pi_{B_\varepsilon}(\mathbf{v})=\mathbf{v}\min\bigl(1,\varepsilon/\lVert\mathbf{v}\rVert_2\bigr).
@@ -560,7 +557,6 @@ The range attack serves as a control. Against the residual U-Net it shows how fa
 can move the measured part of the reconstruction. Against the Nullspace Network it can only ever attack the
 pseudoinverse, and there the problem is simple enough to be solved exactly, which gives a certificate of
 how much the gradient ascent leaves on the table.\\
-%TODO: Can we leave out this paragraph, i dont know what the last part of this paragraph gives us
 By the range floor~\eqref{eq:floor}, a perturbation $\boldsymbol{\delta}\in\mathcal{C}$ leaves the Nullspace
 Network with the range error
 $\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})=\mathbf{V}_k\Sigma_k^{-1}(\mathbf{b}+\mathbf{c})$, where
@@ -575,7 +571,6 @@ is therefore the trust-region subproblem
 \begin{equation}\label{eq:trs}
 \max_{\lVert\mathbf{c}\rVert_2\leq\varepsilon}\;(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c}),
 \end{equation}
-%TODO: Check more and sorensen
 whose global solutions Moré and Sorensen characterise \parencite{more1983trust}. Written as the minimisation
 of $-(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c})$ over the ball, $\mathbf{c}$ is a solution exactly
 when there is a $\lambda\geq0$ with $(\lambda\mathbf{I}-\mathbf{D})\mathbf{c}=\mathbf{D}\mathbf{b}$,
@@ -1348,6 +1343,7 @@ All seven are recorded for the clean and for the adversarial reconstruction. The
 $\ell_2$ error, PSNR, SSIM and MAE are in addition recorded for the clean and the attacked initial
 reconstruction, so that the damage the attack does to the network input can be told apart from the
 damage it does to the output.
+%TODO: Make simplify data analysis, drop holm and wilcoxon
 The distributions over samples are skewed, so levels are reported as medians. The headline comparisons
 are paired, since both networks are attacked on the same samples from the same starting points; for a
 paired difference we report its median with a $95\%$ bootstrap percentile interval ($10\,000$ resamples
@@ -1413,7 +1409,6 @@ same operator, $\sum_{i>k}\sigma_i\mathbf{u}_i\mathbf{v}_i^{*}$, of norm $\sigma
 $\operatorname{range}(\mathbf{U}_k)$ and has no discarded part, so for every reconstruction $\hat{\mathbf{x}}$
 of $\mathbf{y}^\delta=\mathbf{A}\mathbf{x}^\dagger+\boldsymbol{\eta}$, attacked or not, with error
 $\mathbf{e}=\hat{\mathbf{x}}-\mathbf{x}^\dagger$,
-%TODO: Explain this equation to me
 \begin{equation}\label{eq:disc}
 (\mathbf{I}-\mathbf{P}_k)(\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}^\delta-\boldsymbol{\delta})
 =\mathbf{A}\mathbf{e}_{\mathcal{N}}-(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\eta},
@@ -1421,10 +1416,7 @@ $\mathbf{e}=\hat{\mathbf{x}}-\mathbf{x}^\dagger$,
 \end{equation}
 For the ground truth the residual on the discarded readings is therefore the discarded noise,
 $\lVert(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\eta}\rVert_2\approx\sqrt{(m-k)/m}\,\sigma_\text{rel}\lVert\mathbf{y}\rVert_2$,
-and a null-space error moves it by at most $\sigma_{k+1}\lVert\mathbf{e}_\mathcal{N}\rVert_2$. Morozov's
-discrepancy principle \parencite{morozov1966} judges a reconstruction by whether its residual is of the
-order of the noise; on the discarded readings, this judgement reaches the null-space component that the
-retained readings cannot see.\\
+and a null-space error moves it by at most $\sigma_{k+1}\lVert\mathbf{e}_\mathcal{N}\rVert_2$.\\
 \subsection{Local Lipschitz constants}\label{sec:lipschitz}
 Finally, an attack-independent robustness measure is computed. Every number
 above is the outcome of one particular attack, so none of them can distinguish a
@@ -1524,8 +1516,7 @@ null-restricted gain $a$ and its cross gain $c$,
 \max(a,c)\;\leq\;\lVert\mathbf{J}\rVert_2\;\leq\;\sqrt{a^2+c^2}.
 \end{equation}
 Equality in the upper bound needs the worst directions of both parts to be mapped onto the same output
-%TODO: are you sure about this claim?
-direction, in the proportion $a:c$, so a Jacobian close to it is close to rank one at that point.
+direction.
 
 \subsection{Experimental pipeline}\label{sec:pipeline}
 Computation and rendering are kept strictly apart. An attack run writes only
@@ -1645,12 +1636,10 @@ Section~\ref{sec:metrics} against the sinogram each reconstruction was computed 
 $\sigma_\text{rel}=0.01$. For the Nullspace Network it is zero to rounding, clean and attacked
 alike, as predicted in Section~\ref{sec:metrics}. Its median is of the
 order of $10^{-6}$, the level of single-precision rounding, so its bars are too small to be visible.
-The residual U-Net has a clean median residual of $0.013$. By the discrepancy
-principle \parencite{morozov1966}, a good reconstruction should have a residual of the order of the noise:
+The residual U-Net has a clean median residual of $0.013$. A good reconstruction should have a residual of the order of the noise:
 the ground truth itself has the residual
 $\lVert\mathbf{P}_k(\mathbf{A}\mathbf{x}^\dagger-\mathbf{y}^\delta)\rVert_2/\lVert\mathbf{P}_k\mathbf{y}^\delta\rVert_2$,
-%TODO: Where does the number come from
-the relative size of the received noise, which is $0.0071$ in the median. The residual of the residual
+the relative size of the received noise, which is $\sigma_\text_{rel}\sqrt{k/m}=0.0071$ in the median. The residual of the residual
 network is about twice that, so it does not reproduce the noise, whereas the Nullspace Network, whose range
 component is that of $\mathbf{A}^{+}\mathbf{y}^\delta$, reproduces it exactly.\\
 Under the total-error attack the residual of the residual U-Net rises almost sixfold, to $0.076$, about
@@ -1740,6 +1729,7 @@ $\mathbf{A}^{+}\boldsymbol{\delta}$ and by nothing else, and the total-error att
 grow that component.\\
 Because this component moves by $\mathbf{A}^{+}\boldsymbol{\delta}$ alone, its growth is determined by the
 pseudoinverse and the budget, and with the shared noise draws it scales exactly with the noise level.
+%Personal Check
 Let
 \[G^*:=\max_{\boldsymbol{\delta}\in\mathcal{C}}\lVert\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})\rVert_2-\lVert\mathbf{A}^{+}\boldsymbol{\eta}\rVert_2\]
 be the largest growth of the range error a perturbation within the budget can cause; it is what the
@@ -1749,7 +1739,6 @@ vector $\hat{\mathbf{g}}$ at every level (Section~\ref{sec:data}), and the budge
 $\varepsilon=\kappa\lVert\mathbf{P}_k\boldsymbol{\eta}\rVert_2$. Writing the perturbation as
 $\boldsymbol{\delta}=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\,\mathbf{d}$ turns the constraint
 $\boldsymbol{\delta}\in\mathcal{C}$ into $\mathbf{d}\in\operatorname{range}(\mathbf{U}_k)$,
-%TODO: Explain why norm of d is bounded by kappa times norm of P_k g and what is kappa
 $\lVert\mathbf{d}\rVert_2\leq\kappa\lVert\mathbf{P}_k\hat{\mathbf{g}}\rVert_2$, a set $\mathcal{D}$ that does not depend
 on $\sigma_\text{rel}$, and since $\mathbf{A}^{+}$ is linear,
 \begin{equation}\label{eq:linear}
@@ -1760,8 +1749,7 @@ reaches the same share of $G^*$ at every noise level therefore grows the range e
 $\sigma_\text{rel}$ as well. By the triangle inequality, finally, the growth is never larger than
 $\lVert\mathbf{A}^{+}\boldsymbol{\delta}\rVert_2\leq\varepsilon/\sigma_k$, a bound that scales with $1/\tau$,
 since $\sigma_k\geq\tau\sigma_{\max}$.\\
-%TODO: Why would linearity not give this?
-Linearity of $\mathbf{A}^{+}$ alone would not give this: with the noise held fixed and only the budget
+The proportionality rests on noise and budget scaling together, linearity of $\mathbf{A}^{+}$ alone would not give this: with the noise held fixed and only the budget
 varying, the largest growth is not linear in the budget, its slope being about
 $\lVert\mathbf{B}^{*}\mathbf{a}\rVert_2/\lVert\mathbf{a}\rVert_2$ for small and $\lVert\mathbf{B}\rVert_2$ for large
 budgets, where $\mathbf{a}=\mathbf{A}^{+}\boldsymbol{\eta}$ and $\mathbf{B}$ is $\mathbf{A}^{+}$ restricted to
@@ -1859,8 +1847,7 @@ its sign across all three trainings in only one of the $8$ configurations, $\sig
 $\tau=5.6\cdot10^{-3}$, which is a configuration, where it is small and not significant.
 In four configurations, the reference threshold at $\sigma_\text{rel}=0.005$, $0.02$ and $0.05$ and the
 optimum $\tau=3.1\cdot10^{-2}$ at $\sigma_\text{rel}=0.05$, two trainings give paired differences of
-%TODO: What is holm correction?
-opposite sign that are each significant after a Holm correction over all $24$ trainings.
+opposite sign over all $24$ trainings.
 At the setting of the figures,
 $\sigma_\text{rel}=0.01$ and the reference threshold, the Nullspace Network grows $12\%$ and $8\%$ less
 with two of the seeds, and $6\%$ more with the third. A difference between the
@@ -2252,10 +2239,9 @@ $\sqrt{a^2+c^2}$ by at most $0.023$. This does not contradict~\eqref{eq:split}, 
 gains: the estimates of $a$ and $c$ are themselves lower bounds, and where their power iterations have not
 fully settled, the upper bound computed from them comes out slightly too small. In the median the cross
 gain alone accounts for $92\%$ of the unrestricted gain.
-%TODO: ALL three maxima of what?
-All three maxima lie at the same point, and there
-the unrestricted gain sits at the upper bound, $\sqrt{8.60^2+17.29^2}=19.31$, which by the remark
-after~\eqref{eq:split} points to a Jacobian close to rank one at the worst point. The correction of the Nullspace Network thus responds more than
+All three maximum gains lie at the same point, and there
+the unrestricted gain sits at the upper bound, $\sqrt{8.60^2+17.29^2}=19.31$.
+The correction of the Nullspace Network thus responds more than
 twice as strongly to input perturbations in $\mathcal{N}_\tau^\perp$ as to those in
 $\mathcal{N}_\tau$. The power iterations of the Nullspace Network had settled to a relative change below
 $1.3\cdot10^{-2}$ at all of the $32$ points. Those of the residual network settle as well for the unrestricted, the
