@@ -2262,17 +2262,18 @@ the second seed the outcome is reversed (Section~\ref{sec:results-general}).\\
 Table~\ref{tab:gains} sets the median gains of all $18$ runs next to the outcome of the null-space attack.
 None of the gains predicts which network the attack damages more. In $12$ of the $16$ single-ellipse runs
 the paired difference of Table~\ref{tab:robustness} lies outside sampling error, and in $7$ of them the
-null-space error of the Nullspace Network grows less, so the prediction ``the Nullspace Network
-grows less'' is right in $7$ of the $12$. The null-restricted gain is right in $6$, since it is lower for the
-Nullspace Network in every single-ellipse run but one, $\sigma_\text{rel}=0.05$ at $\tau=6.2\cdot10^{-2}$,
-where the Nullspace Network nevertheless grows less. The attack gain is likewise lower for the Nullspace
-Network everywhere except in that run and at $\sigma_\text{rel}=0.005$ and $\tau=5.6\cdot10^{-3}$, and is
-right in $7$. The cross gain is right in $5$. On single ellipses, none of the gains does better than the
-%TODO: WHar is constant prediction
-constant prediction. In the two multi-ellipse runs all three gains are higher for the Nullspace Network
-and its null-space error does grow more (Section~\ref{sec:results-data}), so over all $18$ runs the
-null-restricted, the cross and the attack gain are right in $8$, $7$ and $9$ of the $14$ differences outside
-sampling error, against $7$ for the constant prediction; the agreement rests on these two runs.
+null-space error of the Nullspace Network grows less. A fixed guess that ignores the gains and always
+says ``the Nullspace Network grows less'' is therefore right in $7$ of the $12$, and a gain is useful as a
+predictor only if it is right more often than this guess. The null-restricted gain is right in $6$. It is
+lower for the Nullspace Network in every single-ellipse run but one, $\sigma_\text{rel}=0.05$ at
+$\tau=6.2\cdot10^{-2}$, where the Nullspace Network nevertheless grows less, so it makes almost the same
+guess in every run. The attack gain is likewise lower for the Nullspace Network everywhere except in that
+run and at $\sigma_\text{rel}=0.005$ and $\tau=5.6\cdot10^{-3}$, and is right in $7$. The cross gain is right
+in $5$. On single ellipses, none of the gains does better than the fixed guess. In the two multi-ellipse
+runs all three gains are higher for the Nullspace Network and its null-space error does grow more
+(Section~\ref{sec:results-data}), so over all $18$ runs the null-restricted, the cross and the attack gain
+are right in $8$, $7$ and $9$ of the $14$ differences outside sampling error, against $7$ for the fixed
+guess; the agreement rests on these two runs.
 Two runs show how far gain and outcome can part. At $\sigma_\text{rel}=0.05$ and $\tau=6.2\cdot10^{-2}$, the
 Nullspace Network has a cross gain $26\%$ and an attack gain $44\%$ higher than the residual network, yet its
 null-space error grows $8\%$ less. At $\sigma_\text{rel}=0.02$ and the reference threshold, its cross gain
@@ -2539,7 +2540,7 @@ Unlike on single ellipses, the local gains point the same way as the attack: the
 cross and the attack gain of the Nullspace Network are $12$ to $22\%$ higher than those of the residual
 network at both thresholds (Table~\ref{tab:gains}), and at the reference threshold those of both networks
 are between three and nineteen times their values on single ellipses. On these phantoms data consistency does not merely fail to make the learned
-correction more robust: the correction of the Nullspace Network is the slightly more vulnerable of the
+correction more robust: the correction of the Nullspace Network is the more vulnerable of the
 two. The difference has the same sign at both thresholds and in every gain. With one training per
 network, however, it cannot be set against the variation between trainings. On single ellipses at
 $\sigma_\text{rel}=0.05$ and the reference threshold, a change of seed alone moved the paired difference
@@ -2683,4 +2684,9 @@ clinically meaningful changes, such as inserting or removing a lesion, rather th
 joint choice of the truncation threshold and the network, which this thesis found to decide both the
 accuracy and the robustness in total error of the Nullspace Network, deserves a study of its own.
 %TODO: Check bibliography
+\subsubsection{Acknowledgements}
+I would like to thank my supervisor, Prof.\ Dr.\ Markus Haltmeier, for his guidance and support throughout this work.
+I also received many valuable suggestions about this workfrom Prof.\ Dr.\ Jürgen Frikel, Dr.\ Johannes Schwab, Dr.\ Simon Göppel and Benjamin Walder.
+Throughout my work, I used the computing resources of the University of Innsbruck, which I would like to thank for their support.
+I also used Claude AI for proofreading and improving the clarity of my writing, as well as for aid in the coding process.
 \printbibliography\end{document}
