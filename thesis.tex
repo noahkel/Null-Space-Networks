@@ -10,8 +10,9 @@
 \usepackage{caption}
 \usepackage{subcaption}
 
-% every \section starts on a fresh page
-\pretocmd{\section}{\clearpage}{}{}
+% every \section starts on a fresh page, unless \sectionclearpagefalse is set
+\newif\ifsectionclearpage \sectionclearpagetrue
+\pretocmd{\section}{\ifsectionclearpage\clearpage\fi}{}{}
 
 % clickable cross-references, citations and table of contents.
 % for a print version, replace the options below by [hidelinks].
@@ -68,13 +69,39 @@
 \newcommand{\pending}[1]{\ifmarkpending\textcolor{orange}{#1}\else#1\fi}
 % smallest singular value of A relative to the largest (double precision)
 \newcommand{\SMINREL}{2.1\cdot10^{-7}}
-\title{Nullspace Networks and Adversarial Attacks in Limited-Angle Computed Tomography}
-\author{Noah Keltsch}
-\date{October 2026}
+% colours of the university logo (CMYK values taken from the logo file)
+\definecolor{uibkblue}{cmyk}{1,0.6,0,0.56}
+\definecolor{uibkorange}{cmyk}{0,0.5,1,0}
+\hypersetup{pdftitle={Nullspace Networks and Adversarial Attacks in Limited-Angle Computed Tomography},
+            pdfauthor={Noah Keltsch}}
 
 \begin{document}
 
-\maketitle
+\begin{titlepage}
+% the trim removes the logo's built-in protection zone, so that its squares align with the margin
+\noindent\includegraphics[width=0.46\textwidth, trim=37.5bp 36.5bp 36bp 37.25bp, clip]{figures/uibk_logo.pdf}
+\vspace*{\fill}
+
+\noindent{\color{uibkorange}\rule{2.5cm}{3pt}}\par
+\vspace{1.2em}
+\begin{flushleft}
+{\large\scshape Master's Thesis\par}
+\vspace{1em}
+{\huge\bfseries Nullspace Networks\\ and Adversarial Attacks\\ in Limited-Angle\\ Computed Tomography\par}
+\vspace{2em}
+{\Large Noah Keltsch\par}
+\end{flushleft}
+\vspace*{\fill}\vspace*{\fill}
+
+\noindent{\color{uibkblue}\rule{\textwidth}{0.5pt}}\par
+\vspace{0.8em}
+\noindent\begin{tabular}{@{}l@{\hspace{1.5em}}l}
+\textcolor{uibkblue}{Supervisor}  & Prof.\ Dr.\ Markus Haltmeier \\
+\textcolor{uibkblue}{Institution} & Department of Mathematics, University of Innsbruck \\
+\textcolor{uibkblue}{Date}        & October 2026
+\end{tabular}
+\end{titlepage}
+
 \begin{abstract}
 %TODO: Read Abstract
 Neural networks that post-process a classical reconstruction are a promising approach to
@@ -102,11 +129,12 @@ other, and where both networks were trained three times, the sign of their diffe
 trainings in seven of eight configurations: data consistency alone does not make the learned correction
 robust.
 \end{abstract}
+\clearpage
 \tableofcontents
 
 \section{Introduction}
 Computed tomography (CT) is an important diagnostic tool in modern medicine, used to identify a wide range of injuries and diseases inside the body, for example to screen the chest for viral and bacterial pneumonia, tuberculosis or lung cancer, and the bones and teeth for fractures and infections \parencite{CT-Scan}.
-Reconstructing an image of the tissue from the measurements is an inverse problem, which is usually solved with the filtered back projection.
+Reconstructing an image of the tissue from the measurements is an inverse problem, which is classically solved with the filtered back projection.
 When applied to measurements from a limited-angle CT scan, however, this reconstruction produces artifacts and unsatisfactory image quality \parencite{CT-LA-CNN}.
 Because the limited-angle problem is severely ill-posed, an accurate reconstruction method for this setting has yet to be found. Reconstruction with neural networks is a promising approach,
 since neural networks have been used successfully for many kinds of inverse problems.
@@ -155,7 +183,10 @@ as a weighted sum of the indicator functions of the pixels, and collect the weig
 with $\mathbf{A}_{ij}:=\mathcal{R}\varphi_j(\theta_i,s_i)$. Stacking all $m$ measurements into one vector gives the linear system
 \[y=\mathbf{A}c.\]
 The parameters $\theta_i$ and $s_i$ of the measurements, together with the choice of basis functions, uniquely define $\mathbf{A}\in\mathbb{R}^{m\times n}$.\\
-Having the matrix explicitly simplifies the implementation and allows us to reconstruct the image with the pseudoinverse $\mathbf{A}^{+}$. Because of its memory and computational requirements, this approach is not used in clinical CT\@. Clinical images have $512 \times 512$ pixels, and low-dose clinical CT works with $700$ to $900$ detector elements and about $1000$ projections per $360^\circ$ rotation, which corresponds to $500$ projections per $180^\circ$ \parencite{Flohr2013}. This would give a matrix of size $350\,000\times262\,144$, whose singular value decomposition takes far too long to be feasible in clinical practice. In our laboratory setting the matrix is smaller, and having it at hand makes concepts like the null space and its orthogonal complement explicit. This will be important when we discuss Nullspace Networks and the decomposition of the error into the null space and its complement.\\
+Having the matrix explicitly simplifies the implementation and allows us to reconstruct the image with the pseudoinverse $\mathbf{A}^{+}$. Because of its memory and computational requirements, this approach is not used in clinical CT\@.
+Clinical images have $512 \times 512$ pixels, and low-dose clinical CT works with $700$ to $900$ detector elements and about $1000$ projections per $360^\circ$ rotation, which corresponds to $500$ projections per $180^\circ$ \parencite{Flohr2013}.
+This would give a matrix of size $350\,000\times262\,144$, whose memory would be at several hundred terabytes, and its singular value decomposition would take far too long to be feasible in clinical practice. In our laboratory setting the matrix is smaller,
+and having it at hand makes concepts like the null space and its orthogonal complement explicit. This will be important when we discuss Nullspace Networks and the decomposition of the error into the null space and its complement.\\
 The pseudoinverse is constructed from the singular value decomposition, which generalises the eigenvalue decomposition to non-square matrices. A general matrix $\mathbf{A}\in\mathbb{R}^{m\times n}$ can be written as
 \[\mathbf{A}=\mathbf{U}\Sigma\mathbf{V}^*,\]
 where $\mathbf{U}\in\mathbb{R}^{m\times m}$ and $\mathbf{V}\in\mathbb{R}^{n\times n}$ are orthogonal matrices
@@ -240,7 +271,7 @@ The activation function is usually nonlinear. One neuron can therefore be modell
 \[y = \phi\Big(\sum_{i=1}^n w_i x_i + b\Big),\qquad w_i,x_i,b\in\mathbb{R},\]
 where $y$ is the output, $\phi:\mathbb{R}\to\mathbb{R}$ is the activation function, $w_i x_i$ are the weighted inputs and $b$ is the bias of that neuron.
 The layers of a neural network are evaluated in sequence: the input layer receives the network input and feeds its output into the next layer. How the layers are connected is an architectural choice.
-A fully connected layer feeds the output of every neuron of the preceding layer into every neuron of the layer itself. Each weight belongs to one input of one neuron. A layer of $m$ neurons reading $n$ inputs therefore holds the weight matrix $\mathbf{W}\in\mathbb{R}^{m\times n}$ and the bias vector $\mathbf{b}\in\mathbb{R}^{m}$. No two of its $nm+m$ parameters are tied to one another \parencite{Goodfellow}.
+A fully connected layer feeds the output of every neuron of the preceding layer into every neuron of the layer itself. Each weight belongs to one input of one neuron. A layer of $k$ neurons reading $l$ inputs therefore holds the weight matrix $\mathbf{W}\in\mathbb{R}^{k\times l}$ and the bias vector $\mathbf{b}\in\mathbb{R}^{k}$. No two of its $kl+k$ parameters are tied to one another \parencite{Goodfellow}.
 A different approach, the so-called convolutional layer, acts like a convolution with a small kernel.
 To understand it, it is best to think of the neurons of a layer as a grid, so that we can speak of a neuron of one layer and the neurons of the next layer that neighbour it.
 A convolutional layer then differs from a fully connected one in two respects \parencite{Goodfellow}. It is sparsely connected, in that a neuron receives input only from a small neighbourhood of the corresponding position in the previous layer. In addition, its weights are shared, in that the same small set of weights, the kernel, is reused at every position of the grid.
@@ -248,15 +279,14 @@ The second property is what makes the layer a convolution rather than merely a s
 Layer by layer, the hidden layers are computed according to these connections until the data reach the output layer, which produces the network output.\\
 \subsubsection{Residual networks}
 Depth is one of the main sources of the expressive power of neural networks. Nevertheless,
-it has been reported that adding more layers to a suitably deep model increases its training error \parencite{res}.
+it has been reported that adding more layers to a suitably deep model increases its training error~\parencite{res}.
 This is surprising, as it is easy to write down a deeper model that performs on par with the shallow one:
 it suffices to append layers that compute the identity to the shallow model.
 The resulting model is deeper but performs exactly as well as the shallow one it was built from.
 This indicates that some deep networks are harder to optimise than shallow ones, and that the degradation is a
-failure of optimisation rather than a lack of expressive power \parencite{res-org}.
+failure of optimisation rather than a lack of expressive power~\parencite{res-org}.
 Residual networks address this degradation problem by learning the residual instead of the whole mapping. They were
-introduced for image classification, where every layer is convolutional, and the residual connection is what made
-networks of a hundred and more convolutional layers trainable at all \parencite{res-org}. The two ideas, convolution
+introduced for image classification, where every layer is convolutional, and the residual connection improves trainability for networks with a lot of layers~\parencite{res-org}. The two ideas, convolution
 and residual connection, are independent of one another, and it is the residual connection alone that we borrow here;
 the convolutional part of our architecture is contributed by the U-Net of Section~\ref{sec:unet}.
 Let $\mathcal{H}:\mathbf{Y}\to\mathbf{X}$ be the true mapping from measurements to images, and let $\mathcal{I}:\mathbf{Y}\to\mathbf{X}$ be the identity
@@ -285,7 +315,7 @@ null-space correction to be added to.
 This is the construction of FBPConvNet \parencite{jin2017fbpconvnet}, a residual U-Net applied to
 a classical reconstruction, here the truncated pseudoinverse instead of the filtered back projection.
 We refer to $N_\theta$ as the network and to $\mathcal{F}_\theta$ as the reconstruction
-method. Both symbols are used with these meanings for the remainder of this work.\\
+method.\\
 \subsubsection{U-Net}\label{sec:unet}
 So far we have only discussed the overall architecture of the reconstruction method.
 We now turn to the architecture of the neural network itself.
@@ -437,7 +467,7 @@ the space of images. This section describes the methods we use to attack $\mathc
 \subsection{Threat model and projected gradient ascent}\label{sec:attacks}
 An adversarial attack depends heavily on the threat model, which defines how much information the attacker is given and how the success of the attack is measured.
 The attacks investigated in this work are so-called white-box attacks. Unlike a black-box attacker, a white-box attacker has complete knowledge of the reconstruction method;
-in our case the attacker knows the exact model architecture as well as its weights. Such an attack is much more powerful than a black-box attack,
+in our case the attacker knows the exact model architecture as well as its weights. Such an attack is generally at least as powerful as a black-box attack,
 in which the attacker has no knowledge of the reconstruction method. As mentioned before, the aim is to find a small perturbation $\boldsymbol{\delta}^* \in\mathbf{Y}$ defined by
 \[\boldsymbol{\delta}^*\;=\argmax_{\lVert\boldsymbol{\delta}\rVert_p \leq \varepsilon}\;\mathcal{L}(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}), \mathbf{x}^\dagger ),\]
 where $\mathbf{y}$ are the measurements, $\mathbf{x}^\dagger$ is the ground truth corresponding to them,
@@ -477,7 +507,7 @@ A last adaptation concerns the feasible set. The reconstruction methods of this 
 measurement only through $\mathbf{x}_\text{init}=\mathbf{A}^{+}\mathbf{y}$, and
 $\mathbf{A}^{+}=\mathbf{V}_k\Sigma_k^{-1}\mathbf{U}_k^{*}$ sees only the component of a sinogram in
 $S:=\operatorname{range}(\mathbf{U}_k)$. We therefore restrict the perturbation to $S$, which gives the
-feasible set $\mathcal{C}:=S\cap B_\varepsilon$, where $B_\varepsilon$ is now the ball of radius
+feasible set $\mathcal{C}:=S\cap B_\varepsilon$, where $B_\varepsilon$ is the ball of radius
 $\varepsilon$ about the origin. The restriction loses the attacker nothing. The
 reconstruction depends on the sinogram only through $\mathbf{U}_k^{*}\mathbf{y}$, and since $\mathbf{U}_k$ has
 orthonormal columns, $\mathbf{U}_k^{*}\mathbf{P}_k=\mathbf{U}_k^{*}$. A perturbation $\boldsymbol{\delta}$ from
@@ -597,11 +627,12 @@ whether it can be corrupted into something that still looks like a plausible sca
 different patient. We refer to the two as the \emph{attack towards the zero image} and the
 \emph{attack towards another sample}. A targeted attack is in general a harder problem than an untargeted one,
 because the attacker must reach one particular point of image space rather than any point
-far from the ground truth, and we should expect correspondingly smaller errors at the same
-budget.
+far from the ground truth. Additionally, the attack does not maximise the error but instead, minimise the distance to the target,
+so we should expect correspondingly smaller errors at the same budget.
 \section{Numerical implementation}\label{sec:implementation}
 This section describes how the operators, networks and attacks of the previous
-two sections are realised in code. The implementation is written in Python and
+two sections are realised in code. All of the code can be found on the public repository \url{https://github.com/noahkel/Null-Space-Networks}.\\
+The implementation is written in Python and
 rests on two libraries: the ASTRA Toolbox \parencite{Astra} provides the tomographic geometry and
 PyTorch \parencite{Pytorch} provides the tensor algebra,
 the neural network layers and reverse-mode automatic differentiation.
@@ -646,9 +677,10 @@ The second descriptor is the projection geometry, which fixes the beam type
 (\texttt{parallel}), the spacing of the detector elements, their number, and the
 vector of projection angles. From the two descriptors a projector is built using
 the \texttt{strip} model, which integrates over the strip that a detector
-element actually sees rather than along an infinitely thin line. This is the
-discretisation assumed in Section~\ref{sec:pseudoinverse}, a pixel basis on the image
-side and a finite set of measurements $(\theta_i,s_i)$ on the sinogram side, with one refinement. The entry $\mathbf{A}_{ij}$ is not the line integral $\mathcal{R}\varphi_j(\theta_i,s_i)$ at the centre of the
+element actually sees rather than along an infinitely thin line. Due to the detector width being equal to the pixel size, this is the
+discretisation assumed in Section~\ref{sec:pseudoinverse}. A pixel basis on the image
+side and a finite set of measurements $(\theta_i,s_i)$ on the sinogram side, with one refinement.
+The entry $\mathbf{A}_{ij}$ is not the line integral $\mathcal{R}\varphi_j(\theta_i,s_i)$ at the centre of the
 detector element but its integral over the width of the element, which is the area in which the strip and pixel $j$ overlap.\\
 The geometry used for every experiment in this work is the following.
 
@@ -727,7 +759,7 @@ with the tolerance $\delta$ taken relative to the norm of the matrix \parencite{
 The size of $\tau$ should be consistent with the machine precision when the data are exact.
 Our data are not exact.
 They carry relative noise of $\sigma_\text{rel}\in\{0.005,\,0.01,\,0.02,\,0.05\}$,
-four to five orders of magnitude above the single-precision roundoff
+about five orders of magnitude above the single-precision roundoff
 $\epsilon\approx1.2\cdot10^{-7}$ of the paragraph on precision below, so a
 cutoff at machine precision would be meaningless here. The value $\tau=4\cdot10^{-3}$ sits
 just below the smallest of the four noise levels. The heuristic behind this choice is that a
@@ -788,7 +820,7 @@ $\lVert\mathbf{e}\rVert^2=\lVert\mathbf{e}_{\mathcal{N}^\perp}\rVert^2+
 Third, all of these operations are ordinary tensor products, so PyTorch differentiates them, and the
 gradient of an attack loss can travel back through the initial reconstruction into the measurements.\\
 Finally, precision and layout. Everything is single precision and dense. A ray crossing an image of
-$w\times w$ pixels meets on the order of $w$ of them, so about $0.8\,\%$ of the entries of $\mathbf{A}$ are
+$w\times w$ pixels meets on the order of $w$ of them, so at least $0.8\,\%$ of the entries of $\mathbf{A}$ are
 nonzero at $w=128$; at this density the indirect indexing of a sparse kernel costs more than it saves, and
 the automatic differentiation of sparse CSR products is still experimental.\\
 Single precision is chosen for the matrices and the stored factors because it halves
@@ -813,7 +845,7 @@ deliberate simplification. It keeps the learning problem simple enough that both
 architectures reach a small clean error in the component they control, so that what an attack adds
 is not masked by what the networks fail to learn.
 To test whether the findings carry over to more complex images, the study is repeated at one noise level with the single ellipse replaced by
- the $\operatorname{Poisson}(40)$ overlapping ellipses of DIVAL's standard generator.\\
+the $\operatorname{Poisson}(40)$ overlapping ellipses with intensizies in $[-0.4,1]$, normalized to $[0,1]$, of DIVAL's standard generator.\\
 For every sample the pipeline performs four steps.
 \begin{enumerate}
     \item Draw the ground truth $\mathbf{x}^\dagger$.
@@ -1046,8 +1078,9 @@ def mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
   """training objective: MSE vs ground truth"""
   return torch.mean((pred - target) ** 2)
 \end{lstlisting}
-%PersonalTODO: Look into Adam Optimizer
-Here the tensor $\texttt{pred}$ is the reconstruction and $\texttt{target}$ is the ground truth. The model parameters are trained with the Adam optimiser \parencite{Adam}, which adapts a per-parameter step size from running estimates of the first and second moments of the gradient. In PyTorch the optimiser is created as
+Here the tensor $\texttt{pred}$ is the reconstruction and $\texttt{target}$ is the ground truth. The model parameters are initialized randomlyand trained with the Adam optimiser \parencite{Adam}, which adapts a per-parameter step size from running estimates of the first and second moments of the gradient.
+The weights for the architectures are not initialised with the same random seed, so the networks start from different points in parameter space.
+In PyTorch the optimiser is created as
 \begin{lstlisting}[language=Python, caption=Adam optimiser]
 optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 \end{lstlisting}
@@ -1249,9 +1282,8 @@ and once inside the loss, where it selects the component being maximised, and it
 For an attack on the residual network it occurs only in the loss.\\
 Applying the projector once costs $2kn\approx3.7\cdot10^{8}$ multiply-accumulates per sample at the
 reference threshold, and against the Nullspace Network the attack pays that four times per step, twice in
-the forward and twice in the backward pass. It remains affordable because these are dense
-single-precision products on the GPU, whose double-precision throughput on the A6000 is a sixty-fourth of
-its single-precision one \parencite{GA102}.
+the forward and twice in the backward pass. It remains affordable because these are dense single-precision products on the GPU. 
+Using double-precision on the would multiply the runtime by a factor of $64$ compared to single-precision~\parencite{GA102}.
 \subsubsection{Targeted attacks}
 The two targeted losses of Section~\ref{sec:targeted} are negated squared distances, so that
 maximising them moves the reconstruction towards the target.
@@ -1432,8 +1464,7 @@ whose largest singular value $\sigma_{\max}(\mathbf{T})$ is the local gain of th
 learned channel, that is, the factor by which a worst-case null-space perturbation of the
 input can be amplified into null-space error at the output. A value below one
 means the correction contracts in that subspace, above one that it amplifies.\\
-Computing the Lipschitz constant of a network exactly is NP-hard already for small networks
-\parencite{virmaux2018lipschitz}, whose AutoLip bounds the global constant from above. A local gain at
+Computing the Lipschitz constant of a network exactly is NP-hard already for small networks~\parencite{virmaux2018lipschitz}. A local gain at
 one point is instead the norm of a Jacobian, and
 $\sigma_{\max}(\mathbf{T})$ is estimated by power iteration without assembling the Jacobian. Every
 iterate of the power iteration is a lower bound on the norm, so a gain estimated above one is certified to
@@ -1951,7 +1982,7 @@ The attack also degrades the input before the network, raising the error of the 
 reconstruction by more than half, from $0.34$ to $0.55$; the residual network removes most of that
 degradation. The attacked Nullspace Network reconstruction has far worse metrics, a relative error of
 $0.60$ and an SSIM of $0.07$, because it keeps the attacked range component of its input. Visually, it
-is sharply cut along a diagonal on the upper left, and just like the attacked residual network reconstruction has non uniform interior.
+is sharply cut along a diagonal on the upper left, and just like the attacked residual network reconstruction has non-uniform interior.
 Fringe and streaks are present in the attacked initial reconstruction and remain after the network correction.
 In both examples the perturbation $\boldsymbol{\delta}$ is spread over the whole measured part of the
 sinogram, with pronounced entries on the first and the last measured projection angle, at the edges of
@@ -2166,7 +2197,7 @@ $\tau=4.4\cdot10^{-4}$ it is highest at the last snapshot for the residual netwo
 $\sigma_\text{rel}=0.02$ and for the Nullspace Network at $\sigma_\text{rel}=0.05$. There the
 attackability in absolute terms rises for a large part of the training.\\
 The ratio of attacked to clean error grows over training, for the residual network under both attacks
-and for the Nullspace Network under the null-space attack. This is not because the attacked error grows however, it grows because the clean error falls faster, than the attacked error.
+and for the Nullspace Network under the null-space attack. The ratio grows not because the attacked error grows but because the clean error falls faster.
 This is compatible with the trade-off between accuracy and robustness described for classifiers~\parencite{tsipras2019robustness}.
 \begin{figure}[htbp]
     \centering
@@ -2233,7 +2264,7 @@ $\max(a,c)$, nor larger than the upper bound $\sqrt{a^2+c^2}$. The estimates res
 $32$ points and the upper bound at $30$. At the other two the unrestricted estimate exceeds
 $\sqrt{a^2+c^2}$ by at most $0.023$. This does not contradict~\eqref{eq:split}, which holds for the exact
 gains: the estimates of $a$ and $c$ are themselves lower bounds, and where their power iterations have not
-fully settled, the upper bound computed from them comes out slightly too small. In the median the cross
+fully settled, i.e. the last relative change is less than $10^{-3}$,the upper bound computed from them comes out slightly too small. In the median the cross
 gain alone accounts for $92\%$ of the unrestricted gain.
 All three maximum gains lie at the same point, and there
 the unrestricted gain sits at the upper bound, $\sqrt{8.60^2+17.29^2}=19.31$.
@@ -2394,11 +2425,10 @@ $\tau=4.4\cdot10^{-4}$ it amplifies by up to $1/\tau\approx2\,300$, and its reco
 amplified noise, with an error between $0.86$ and $8.2$ times the norm of the phantom.\\
 The Nullspace Network inherits the range floor exactly at every threshold, so its total error follows
 the range error of the pseudoinverse, not its total error: at every noise level it falls with every step
-in $\tau$, and the Nullspace Network is best at the largest threshold run. At every noise level
-that threshold lies above the optimum of the pseudoinverse; there the pseudoinverse is worse than at
-its optimum, but the Nullspace Network reduces its error once more, by a factor between $1.5$ and $3.7$,
-because the larger threshold moves error from the range component, which it inherits, into the null
-space, which it has learned to fill. The residual network is best at the optimum of the pseudoinverse at
+in $\tau$, and the Nullspace Network is best at the largest threshold run. At every noise level that threshold lies above the optimum of the pseudoinverse.
+The Nullspace Networks error for these thresholds is reduced, because the larger threshold moves error from the range component, which it inherits,
+into the null space, which it has learned to fill. It is reduced by a factor between $1.5$ and $3.7$. 
+The residual network is best at the optimum of the pseudoinverse at
 every noise level. At $\tau=4.4\cdot10^{-4}$ its reconstruction degrades markedly, to between two and four
 times its error at the reference, since it has to remove a range error of up to eight times the norm of the
 phantom from its input. The gap between the two architectures narrows as $\tau$ grows, from a factor between
@@ -2431,9 +2461,8 @@ can only be judged where both networks were trained more than once. Three groups
 \item At the reference and the optimal threshold of all four noise levels, where three seeds were
 trained, the null-space attack raises the null-space errors of both networks thirty- to a
 hundred-and-fortyfold. With the first seed the attacked medians of the two differ by at most $16\%$
-except in two configurations, and the paired difference amounts to at most $12\%$ of the growth except in
-one: at $\sigma_\text{rel}=0.02$ and the reference threshold, where the attacked median of the Nullspace
-Network is $38\%$ higher although its growth is only $11\%$ larger in the paired median, an instance of the
+except in two configurations, and the paired difference amounts to at most $12\%$ of the growth. For one configuration the difference exceeds the $12\%$: at $\sigma_\text{rel}=0.02$ and the reference threshold, where the attacked median of the Nullspace
+Network is $38\%$ higher although its growth is only $11\%$ larger in the paired median. An instance of the
 skew of the per-sample growths; and at $\sigma_\text{rel}=0.05$ and $\tau=3.1\cdot10^{-2}$, where the
 null-space error of the Nullspace Network grows $36\%$ less, and less on $96\%$ of the samples. Neither
 survives a change of seed. At $\sigma_\text{rel}=0.02$ the third seed reverses the sign, the
@@ -2489,7 +2518,7 @@ carry over, namely the exact range floor of the Nullspace Network and the simila
 vulnerability of the two networks, which is an empirical finding.
 The run is repeated at $\tau=1.8\cdot10^{-2}$, the optimum of the pseudoinverse that the truncation study
 finds for these phantoms at $\sigma_\text{rel}=0.01$, where $\dim\mathcal{N}_\tau=7\,195$. It lies above
-the optimum $9.9\cdot10^{-3}$ of single ellipses at the same noise level because the noise, scaled to the
+the optimum $9.9\cdot10^{-3}$ of single ellipses at the same noise level, partly because the noise, scaled to the
 sinogram, is larger relative to the phantom: in the median the sinogram of a multi-ellipse phantom has
 $1.75$ times the norm, relative to that of the phantom, that the sinogram of a single ellipse has. Both
 networks were trained once at each threshold.\\
@@ -2635,8 +2664,7 @@ multi-ellipse phantoms, with one training of each network, it is the slightly le
 both thresholds tested. The
 constraint fixes what the retained measurements
 determine, but it leaves the null space, where they are silent, entirely to the network, and nothing in it
-makes the structure the network adds there stable. That structure, a null-space hallucination in the sense of
-Bhadra et al.\ \parencite{bhadra2021hallucinations}, is exactly what the attacks create. This is in line with the observation of Gottschling et al.\ that
+makes the structure the network adds there stable. This is in line with the observation of Gottschling et al.\ that
 instabilities originate in the null space of the forward operator \parencite{gottschling2025troublesome}:
 restricting the correction to that null space does not remove them.\\
 Several further results qualify this picture. Targeted attacks within the same budget damage the
@@ -2685,15 +2713,15 @@ joint choice of the truncation threshold and the network, which this thesis foun
 accuracy and the robustness in total error of the Nullspace Network, deserves a study of its own.
 %TODO: Check bibliography
 \section*{Acknowledgements}
-\addcontentsline{toc}{section}{Acknowledgements}
 I would like to thank my supervisor, Prof.\ Dr.\ Markus Haltmeier, for his guidance and support throughout
 this work. I am also grateful to Prof.\ Dr.\ Jürgen Frikel, Dr.\ Johannes Schwab, Dr.\ Simon Göppel and
 Benjamin Walder for many valuable suggestions. A special thanks goes to Dr.\ Simon Göppel,
 whose code built the basis for the data generation and the nullspace network.
 The experiments were run on the computing resources of the University of Innsbruck.
 
+\sectionclearpagefalse
 \section*{Use of AI tools}
-\addcontentsline{toc}{section}{Use of AI tools}
+\sectionclearpagetrue
 I used the AI assistant Claude (Anthropic), mostly through the coding tool Claude Code, while working on this thesis. I used it for the following tasks.
 \begin{itemize}
 \item \textbf{Code.} Extending and debugging parts of the code of the experimental pipeline
@@ -2701,7 +2729,7 @@ I used the AI assistant Claude (Anthropic), mostly through the coding tool Claud
 and the numbers of Section~\ref{sec:results} from the stored results of the runs
 \item \textbf{Analysis.} Computing the tables and the numbers cited in Section~\ref{sec:results} from the
 stored results of the runs
-\item \textbf{Writing.} Drafting and revising text, as well as proofreading the thesis for language and clarity.
+\item \textbf{Writing.} Drafting and revising text, as well as proofreading the thesis for language and clarity
 \end{itemize}
 Every number reported in this thesis is computed from the stored outputs of the experiments; none was
 produced by the AI itself. I reviewed all text and code produced with its help, checked it against the
