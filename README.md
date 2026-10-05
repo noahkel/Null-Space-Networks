@@ -96,7 +96,7 @@ python make_tables.py --runs 'attacks_*_v2' --out thesis_tables
 
 which writes the LaTeX rows of every results table and `numbers.txt` with the
 values the text cites (medians, paired differences with bootstrap intervals,
-Wilcoxon tests with Holm correction, the share of the exact worst case, seeds).
+the share of the exact worst case, seeds).
 
 ## Conventions worth knowing
 

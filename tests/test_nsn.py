@@ -2652,23 +2652,16 @@ def test_lipschitz_attack_gain_matches_the_operator_through_the_pseudoinverse(ra
 # =========================================================================== #
 # 15. make_tables.py - the statistics the thesis' tables report.
 # =========================================================================== #
-def test_holm_rejects_step_down():
-    import make_tables as T
-    # sorted p: 0.001 <= 0.05/4, 0.01 <= 0.05/3, 0.03 > 0.05/2 -> stop
-    assert T.holm([0.03, 0.001, 0.2, 0.01]) == [False, True, False, True]
-    assert T.holm([0.5, 0.6]) == [False, False]
-
-
-def test_paired_difference_median_interval_and_wilcoxon():
-    pytest.importorskip("scipy")
+def test_median_interval_and_resolution():
     import make_tables as T
     rng = np.random.default_rng(0)
     d = rng.normal(1.0, 0.5, 200)
-    med, lo, hi, p = T.paired(d, n_boot=2000)
+    med, lo, hi = T.median_interval(d, n_boot=2000)
     assert med == pytest.approx(float(np.median(d)))
     assert lo < med < hi
-    assert p < 1e-10
-    assert T.paired(rng.normal(0.0, 1.0, 50), n_boot=500)[3] > 1e-3
+    assert T.resolved(lo, hi) and T.resolved(-hi, -lo)
+    assert not T.resolved(*T.median_interval(rng.normal(0.0, 1.0, 50), n_boot=500)[1:])
+    assert T.signed(0.0153) == "+0.015" and T.signed(-0.0004) == "-0.0004" and T.signed(0.0) == "+0.000"
 
 
 def test_run_directory_names_are_parsed():

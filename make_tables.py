@@ -12,10 +12,9 @@ prose cites. No torch, model or operator is needed.
     python make_tables.py --runs 'attacks_*_v2' --out thesis_tables
 
 Statistics, as Section 3.7 of the thesis states them: levels are medians (clean
-errors in Tables 1, 8 and 9 are means); a paired difference is the median over
-samples with a 95% bootstrap percentile interval (10 000 resamples) and the
-p-value of a Wilcoxon signed-rank test, and is starred when it stays below 5%
-after a Holm correction over the runs of the table.
+errors in Tables 1, 8 and 9 are means); a median over samples comes with a 95%
+bootstrap percentile interval (10 000 resamples), and a paired difference
+counts as distinguishable from sampling error when that interval excludes zero.
 """
 import argparse
 import csv
@@ -104,30 +103,18 @@ def rel(x: np.ndarray, gt_norm: np.ndarray) -> np.ndarray:
     return x / np.maximum(gt_norm, 1e-3 * math.sqrt(n_pix))
 
 
-def paired(d: np.ndarray, n_boot: int = 10_000, seed: int = 0) -> Tuple[float, float, float, float]:
-    """Median of a paired difference, its 95% bootstrap percentile interval and
-    the Wilcoxon signed-rank p-value."""
+def median_interval(d: np.ndarray, n_boot: int = 10_000, seed: int = 0) -> Tuple[float, float, float]:
+    """Median over samples and its 95% bootstrap percentile interval."""
     rng = np.random.default_rng(seed)
     boot = np.median(rng.choice(d, size=(n_boot, d.size), replace=True), axis=1)
     lo, hi = np.percentile(boot, [2.5, 97.5])
-    try:
-        from scipy.stats import wilcoxon
-        p = float(wilcoxon(d).pvalue) if np.any(d != 0) else 1.0
-    except ImportError:                                  # pragma: no cover
-        p = float("nan")
-    return float(np.median(d)), float(lo), float(hi), p
+    return float(np.median(d)), float(lo), float(hi)
 
 
-def holm(pvalues: List[float], alpha: float = 0.05) -> List[bool]:
-    """Holm's step-down procedure: which hypotheses are rejected at level alpha."""
-    order = np.argsort(pvalues)
-    reject = [False] * len(pvalues)
-    for rank, i in enumerate(order):
-        if pvalues[i] <= alpha / (len(pvalues) - rank):
-            reject[i] = True
-        else:
-            break
-    return reject
+def resolved(lo: float, hi: float) -> bool:
+    """Whether a paired difference is told apart from sampling error: its
+    bootstrap interval excludes zero."""
+    return lo > 0 or hi < 0
 
 
 def null_growth(run: Run, model: str, root: Optional[Path] = None) -> np.ndarray:
@@ -153,6 +140,13 @@ def small(x: float) -> str:
         return f"{x:.2f}"
     mant, exp = f"{x:.1e}".split("e")
     return f"${mant}\\cdot10^{{{int(exp)}}}$"
+
+
+def signed(x: float) -> str:
+    """+0.015; a fourth decimal where three would print a nonzero value as
+    +-0.000, so that the side of zero an interval end lies on stays visible."""
+    s = f"{x:+.3f}"
+    return f"{x:+.4f}" if x != 0 and float(s) == 0 else s
 
 
 def num(x: float, digits: int = 4) -> str:
@@ -241,27 +235,20 @@ def range_attack_share(run: Run) -> float:
         r["cert_e_ran_max"] - r["cert_e_ran_clean"], 1e-30)))
 
 
-def robustness_stats(runs: List[Run]) -> Dict[str, Tuple]:
-    stats = {}
-    for run in runs:
-        d = null_growth(run, "resnet") - null_growth(run, "nsn")
-        stats[run.root.name] = paired(d)
-    names = list(stats)
-    star = holm([stats[n][3] for n in names])
-    return {n: (*stats[n], s) for n, s in zip(names, star)}
+def growth_difference(run: Run, root: Optional[Path] = None) -> Tuple[float, float, float]:
+    """Paired difference of the null-space growths, residual network minus NSN."""
+    return median_interval(null_growth(run, "resnet", root) - null_growth(run, "nsn", root))
 
 
 def table_robustness(runs: List[Run]) -> List[str]:
     """Table 4: the null-space attack, levels and the paired difference."""
-    stats = robustness_stats(runs)
-
     def cells(run):
         out = []
         for model in ("resnet", "nsn"):
             r = run.rows("adversarial_null", model)
             out += [num(np.median(r["clean_rel_l2_nul"])), num(np.median(r["adv_rel_l2_nul"]))]
-        med, lo, hi, p, star = stats[run.root.name]
-        out.append(f"${med:+.3f}\\;[{lo:+.3f},{hi:+.3f}]{'^{*}' if star else ''}$")
+        med, lo, hi = growth_difference(run)
+        out.append(f"${signed(med)}\\;[{signed(lo)},{signed(hi)}]$")
         return out
     return block_rows(runs, cells)
 
@@ -352,8 +339,14 @@ def numbers(runs: List[Run]) -> List[str]:
             if run.has("random_baseline", model):
                 rr = run.rows("random_baseline", model)
                 out.append(f"    random direction: null-space error median {np.median(rr['adv_rel_l2_nul']):.4f}")
+        levels = {m: median_interval(null_growth(run, m)) for m in ("resnet", "nsn")}
+        out.append("  null-space growth median " + ", ".join(
+            f"{m} {v:.3f} [{lo:.3f},{hi:.3f}]" for m, (v, lo, hi) in levels.items()))
         less = float(np.mean(null_growth(run, "nsn") < null_growth(run, "resnet")))
-        out.append(f"  NSN null-space error grows less on {100 * less:.0f}% of the samples")
+        d, lo, hi = growth_difference(run)
+        out.append(f"  NSN null-space error grows less on {100 * less:.0f}% of the samples; "
+                   f"paired difference {d:+.4f} [{lo:+.4f},{hi:+.4f}]"
+                   f"{' (interval excludes zero)' if resolved(lo, hi) else ''}")
         lip = run.lipschitz()
         for model in ("resnet", "nsn"):
             for restriction in ("null", "cross", "attack"):
@@ -365,9 +358,12 @@ def numbers(runs: List[Run]) -> List[str]:
         for seed_root in run.seeds():
             med = {m: float(np.median(run.rows("adversarial_null", m, seed_root)["adv_rel_l2_nul"]))
                    for m in ("resnet", "nsn")}
-            d = (null_growth(run, "resnet", seed_root) - null_growth(run, "nsn", seed_root))
+            d, lo, hi = growth_difference(run, seed_root)
+            g_res = float(np.median(null_growth(run, "resnet", seed_root)))
             out.append(f"  {seed_root.name}: attacked null-space medians resnet {med['resnet']:.4f}, "
-                       f"nsn {med['nsn']:.4f}; paired difference median {np.median(d):+.4f}")
+                       f"nsn {med['nsn']:.4f}; paired difference {d:+.4f} [{lo:+.4f},{hi:+.4f}]"
+                       f"{' (interval excludes zero)' if resolved(lo, hi) else ''}, "
+                       f"{100 * d / max(g_res, 1e-30):+.0f}% of the residual network's growth")
         sweep = run.root / "budget_sweep.csv"
         if sweep.exists():
             with open(sweep, newline="", encoding="utf-8") as f:
