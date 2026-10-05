@@ -185,7 +185,6 @@ The truncation gives rise to a nontrivial null space. Keeping only the $k$ singu
 $\sigma_i\geq\tau\sigma_{\max}$ replaces $\mathbf{A}$ by the truncated operator
 $\mathbf{A}_k:=\mathbf{U}_k\Sigma_k\mathbf{V}_k^{*}$, whose null space is spanned by the discarded right
 singular vectors $\mathbf{v}_{k+1},\dots,\mathbf{v}_n$. $\mathbf{A}$ itself has full column rank: its
-%TODO: Check this formula
 smallest singular value, computed in double precision, is $\sigma_n\approx\SMINREL\,\sigma_{\max}$, far
 above the double-precision rounding level of about $10^{-16}\sigma_{\max}$, although in the single
 precision in which the operators are applied (Section~\ref{sec:pinv}) it could not be told apart from
@@ -506,17 +505,17 @@ through $\mathbf{y}+\boldsymbol{\delta}$ and the chain rule contributes the iden
 iterations therefore produce the same sinograms, and the update rule becomes
 \[\boldsymbol{\delta}_{n+1}:=\Pi_{\mathcal{C}}\left( \boldsymbol{\delta}_n+\alpha\frac{\mathbf{g}_n}{\lVert\mathbf{g}_n\rVert_2}\right),\qquad \mathbf{g}_n:=\nabla_{\boldsymbol{\delta}}\mathcal{L}\!\left(\mathcal{F}_\theta(\mathbf{y}+\boldsymbol{\delta}),\,\mathbf{x}^\dagger\right)\Big|_{\boldsymbol{\delta}=\boldsymbol{\delta}_n},\]
 with the starting point $\boldsymbol{\delta}_0$ drawn at random from $\mathcal{C}$. The projection onto
-$\mathcal{C}$ is the composition of two simple projections, which is not true of intersections in general;
-%TODO: Look at this in pdf
-it holds here because the ball is centred at $0\in S$, which is what the $\boldsymbol{\delta}$-coordinates
+$\mathcal{C}$ is the composition of two simple projections.
+This is due to the ball being centred at $0\in S$, which is what the $\boldsymbol{\delta}$-coordinates
 provide. Take any point $\mathbf{z}$ of $S\cap B_\varepsilon$. Then
 $\mathbf{P}_k\boldsymbol{\delta}-\mathbf{z}$ lies in $S$ and $(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\delta}$ is
 orthogonal to $S$, so by Pythagoras
 $\lVert\boldsymbol{\delta}-\mathbf{z}\rVert^2=\lVert(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\delta}\rVert^2+\lVert\mathbf{P}_k\boldsymbol{\delta}-\mathbf{z}\rVert^2$,
 and only the second term depends on $\mathbf{z}$. Over the whole ball this term is smallest at the radial
 point $\Pi_{B_\varepsilon}(\mathbf{P}_k\boldsymbol{\delta})$, a multiple of $\mathbf{P}_k\boldsymbol{\delta}$ and
-hence a point of $S$. This is where the centre of the ball matters: for a ball centred off $S$ the radial
-point could leave $S$. A point of $S\cap B_\varepsilon$ that is closest to $\boldsymbol{\delta}$ among all
+hence a point of $S$. 
+%TODO: I dont understand the following sentence
+A point of $S\cap B_\varepsilon$ that is closest to $\boldsymbol{\delta}$ among all
 points of the ball is closest among those of $S\cap B_\varepsilon$ as well, and it is the only such point,
 since the squared distance is strictly convex. The projection onto the feasible set is therefore
 \begin{equation}\label{eq:proj}
@@ -561,7 +560,7 @@ The range attack serves as a control. Against the residual U-Net it shows how fa
 can move the measured part of the reconstruction. Against the Nullspace Network it can only ever attack the
 pseudoinverse, and there the problem is simple enough to be solved exactly, which gives a certificate of
 how much the gradient ascent leaves on the table.\\
-%TODO: Look at this in pdf
+%TODO: Can we leave out this paragraph, i dont know what the last part of this paragraph gives us
 By the range floor~\eqref{eq:floor}, a perturbation $\boldsymbol{\delta}\in\mathcal{C}$ leaves the Nullspace
 Network with the range error
 $\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})=\mathbf{V}_k\Sigma_k^{-1}(\mathbf{b}+\mathbf{c})$, where
@@ -576,6 +575,7 @@ is therefore the trust-region subproblem
 \begin{equation}\label{eq:trs}
 \max_{\lVert\mathbf{c}\rVert_2\leq\varepsilon}\;(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c}),
 \end{equation}
+%TODO: Check more and sorensen
 whose global solutions Moré and Sorensen characterise \parencite{more1983trust}. Written as the minimisation
 of $-(\mathbf{b}+\mathbf{c})^{*}\mathbf{D}(\mathbf{b}+\mathbf{c})$ over the ball, $\mathbf{c}$ is a solution exactly
 when there is a $\lambda\geq0$ with $(\lambda\mathbf{I}-\mathbf{D})\mathbf{c}=\mathbf{D}\mathbf{b}$,
@@ -1112,7 +1112,6 @@ The projection sits inside the computational graph and not after it.
 At inference this would make no difference to the form of the map, since projecting the correction of a
 trained residual network would also give a data-consistent map. During training, however,
 it matters. Write $\mathbf{r}=N_\theta(\mathbf{x}_\text{init})$ for the raw network output, so that
-%TODO: Look at this in pdf
 $\hat{\mathbf{x}}=\mathbf{x}_\text{init}+\mathbf{P}_{\mathcal{N}_\tau}\mathbf{r}$. The training objective
 $\mathcal{L}(\hat{\mathbf{x}})=\frac1n\lVert\hat{\mathbf{x}}-\mathbf{x}^\dagger\rVert_2^2$ has the gradient
 $\nabla_{\!\hat{\mathbf{x}}}\mathcal{L}=\frac2n\mathbf{e}$, and the reconstruction depends on $\mathbf{r}$ only
@@ -1407,14 +1406,14 @@ the second is then just the relative size of the perturbation,
 $\lVert\boldsymbol{\delta}\rVert_2/\lVert\mathbf{P}_k\mathbf{y}^\delta\rVert_2$. For the residual U-Net
 nothing ties the output to the data, so both residuals have to be measured.\\
 The residual on the retained readings is blind to the null space by construction. We therefore also
-record the residual on all measured readings, $\lVert\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}^\delta-\boldsymbol{\delta}\rVert_2/\lVert\mathbf{y}^\delta\rVert_2$,
-%TODO: Look at this in pdf
+record the residual on all measured readings, \[\lVert\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}^\delta-\boldsymbol{\delta}\rVert_2/\lVert\mathbf{y}^\delta\rVert_2\],
 and its part on the readings the truncation discards. What that part sees follows from the singular value
 decomposition, by which $(\mathbf{I}-\mathbf{P}_k)\mathbf{A}$ and $\mathbf{A}\mathbf{P}_{\mathcal{N}_\tau}$ are the
 same operator, $\sum_{i>k}\sigma_i\mathbf{u}_i\mathbf{v}_i^{*}$, of norm $\sigma_{k+1}$. The perturbation lies in
 $\operatorname{range}(\mathbf{U}_k)$ and has no discarded part, so for every reconstruction $\hat{\mathbf{x}}$
 of $\mathbf{y}^\delta=\mathbf{A}\mathbf{x}^\dagger+\boldsymbol{\eta}$, attacked or not, with error
 $\mathbf{e}=\hat{\mathbf{x}}-\mathbf{x}^\dagger$,
+%TODO: Explain this equation to me
 \begin{equation}\label{eq:disc}
 (\mathbf{I}-\mathbf{P}_k)(\mathbf{A}\hat{\mathbf{x}}-\mathbf{y}^\delta-\boldsymbol{\delta})
 =\mathbf{A}\mathbf{e}_{\mathcal{N}}-(\mathbf{I}-\mathbf{P}_k)\boldsymbol{\eta},
@@ -1510,7 +1509,6 @@ factor $\sigma_{\max}/\sigma_k\leq1/\tau$. Both are still local, gains of the li
 input, whereas an attack can take the input far from it. All five gains are estimated with $16$ power
 iterations at each of the first $32$ clean inputs of the attacked test samples; since they are strongly
 skewed over these points, their median is reported together with their maximum.
-%TODO: Look at this in pdf
 For the Nullspace Network the gains are related by a bound that serves as a check. Its correction lies in
 $\mathcal{N}_\tau$, so its Jacobian $\mathbf{J}:=\mathbf{J}_g(\mathbf{x}_0)$ satisfies
 $\mathbf{J}=\mathbf{P}_{\mathcal{N}_\tau}\mathbf{J}$. Writing $\mathbf{P}:=\mathbf{P}_{\mathcal{N}_\tau}$, it
@@ -1526,6 +1524,7 @@ null-restricted gain $a$ and its cross gain $c$,
 \max(a,c)\;\leq\;\lVert\mathbf{J}\rVert_2\;\leq\;\sqrt{a^2+c^2}.
 \end{equation}
 Equality in the upper bound needs the worst directions of both parts to be mapped onto the same output
+%TODO: are you sure about this claim?
 direction, in the proportion $a:c$, so a Jacobian close to it is close to rank one at that point.
 
 \subsection{Experimental pipeline}\label{sec:pipeline}
@@ -1741,7 +1740,6 @@ $\mathbf{A}^{+}\boldsymbol{\delta}$ and by nothing else, and the total-error att
 grow that component.\\
 Because this component moves by $\mathbf{A}^{+}\boldsymbol{\delta}$ alone, its growth is determined by the
 pseudoinverse and the budget, and with the shared noise draws it scales exactly with the noise level.
-%TODO: Look at this in pdf
 Let
 \[G^*:=\max_{\boldsymbol{\delta}\in\mathcal{C}}\lVert\mathbf{A}^{+}(\boldsymbol{\eta}+\boldsymbol{\delta})\rVert_2-\lVert\mathbf{A}^{+}\boldsymbol{\eta}\rVert_2\]
 be the largest growth of the range error a perturbation within the budget can cause; it is what the
@@ -1751,6 +1749,7 @@ vector $\hat{\mathbf{g}}$ at every level (Section~\ref{sec:data}), and the budge
 $\varepsilon=\kappa\lVert\mathbf{P}_k\boldsymbol{\eta}\rVert_2$. Writing the perturbation as
 $\boldsymbol{\delta}=\sigma_\text{rel}\lVert\mathbf{y}\rVert_2\,\mathbf{d}$ turns the constraint
 $\boldsymbol{\delta}\in\mathcal{C}$ into $\mathbf{d}\in\operatorname{range}(\mathbf{U}_k)$,
+%TODO: Explain why norm of d is bounded by kappa times norm of P_k g and what is kappa
 $\lVert\mathbf{d}\rVert_2\leq\kappa\lVert\mathbf{P}_k\hat{\mathbf{g}}\rVert_2$, a set $\mathcal{D}$ that does not depend
 on $\sigma_\text{rel}$, and since $\mathbf{A}^{+}$ is linear,
 \begin{equation}\label{eq:linear}
@@ -1761,6 +1760,7 @@ reaches the same share of $G^*$ at every noise level therefore grows the range e
 $\sigma_\text{rel}$ as well. By the triangle inequality, finally, the growth is never larger than
 $\lVert\mathbf{A}^{+}\boldsymbol{\delta}\rVert_2\leq\varepsilon/\sigma_k$, a bound that scales with $1/\tau$,
 since $\sigma_k\geq\tau\sigma_{\max}$.\\
+%TODO: Why would linearity not give this?
 Linearity of $\mathbf{A}^{+}$ alone would not give this: with the noise held fixed and only the budget
 varying, the largest growth is not linear in the budget, its slope being about
 $\lVert\mathbf{B}^{*}\mathbf{a}\rVert_2/\lVert\mathbf{a}\rVert_2$ for small and $\lVert\mathbf{B}\rVert_2$ for large
@@ -1961,23 +1961,15 @@ sample under the null-space attack. The residual network reconstructs it almost 
 unattacked. Attacked, its relative error rises twentyfold, from $0.017$ to $0.346$, but its SSIM stays
 high, at $0.94$: the reconstruction remains sharp and plausible while its null-space component, which
 the retained measurements cannot see, has been rewritten. Instead of the round outline of the phantom, the
-%TODO: Check the descritption
-attacked reconstruction shows a rounded quadrilateral with almost straight edges, its lower right corner
-cut off along a straight diagonal, and its interior is no longer uniform but shaded from darker at the
+attacked reconstruction shows a rounded quadrilateral with almost straight edges,
+and its interior is no longer uniform but shaded from darker at the
 upper left to brighter at the lower right.
-This is the clinically dangerous kind of error: a clean-looking image of the object, deformed into a
-shape it does not have.
 The attack also degrades the input before the network, raising the error of the initial
-%TODO: Check description
 reconstruction by more than half, from $0.34$ to $0.55$; the residual network removes most of that
 degradation. The attacked Nullspace Network reconstruction has far worse metrics, a relative error of
 $0.60$ and an SSIM of $0.07$, because it keeps the attacked range component of its input. Visually, it
-keeps the round outline of the phantom, but a bright crescent with a sharp dark and bright fringe is
-attached to its lower right edge, a faint streak runs from there towards the upper right, and oblique
-streaks from the lower left to the upper right cover the whole background, stronger than in the clean
-reconstruction. Fringe and streaks are already present in the attacked initial reconstruction. Since that
-lies entirely in $\mathcal{N}_\tau^\perp$, they belong to the range component, and the network cannot
-remove them.
+is sharply cut along a idagonal on the upper left, and just like the attacked residual network reconstruction has non uniform interior.
+Fringe and streaks are present in the attacked initial reconstruction and remain after the network correction.
 In both examples the perturbation $\boldsymbol{\delta}$ is spread over the whole measured part of the
 sinogram, with pronounced entries on the first and the last measured projection angle, at the edges of
 the angular window, where the limited-angle operator produces its characteristic artifacts
@@ -2038,19 +2030,16 @@ noise, as it is when $\tau$ lies well below the noise level, cancelling that noi
 shrink $\lVert\hat{\mathbf{x}}\rVert_2$, and it brings the range component closer to the ground truth as a
 side effect. When $\tau$ is large, the range component is dominated by signal, and shrinking it increases
 the error.\\
-%TODO: Check following paragraph
 How often the targeted attacks lower the range error of the Nullspace Network depends on the threshold.
 At $\sigma_\text{rel}=0.01$ and the reference threshold, the attack towards the zero image lowers it on
-$59\%$ of the samples, too few to move the median much. Where $\tau$ lies far below the noise level, at
-the reference threshold for $\sigma_\text{rel}\geq0.02$ and at $\tau=4.4\cdot10^{-4}$ for every noise
-level, it lowers the range error on $95$ to $100\%$ of the samples; at $\tau=4.4\cdot10^{-4}$ and at
-$\sigma_\text{rel}=0.05$ with the reference threshold, the attacked reconstruction is even closer to the
-ground truth than the clean one on $95$ to $100\%$ of the samples. As $\tau$ approaches and exceeds the
+$59\%$ of the samples. For $\tau=4.4\cdot10^{-4}$ at every noise
+level, it lowers the range error on $95$ to $100\%$ of the samples, which brings the attacked reconstruction closer to the
+ground truth on those samples. As $\tau$ approaches and exceeds the
 noise level the effect fades: at the pseudoinverse optimum of the three lower noise levels the attack lowers
 the range error on only $17$ to $19\%$ of the samples, and at $\tau=6.2\cdot10^{-2}$ on at most $3\%$.
 The relative size of $\tau$ and $\sigma_\text{rel}$ is only a rough guide, however: at
 $\sigma_\text{rel}=0.05$ the effect persists at both thresholds above the noise level, on $52\%$ and
-$62\%$ of the samples.\\
+$62\%$ of the samples.
 \begin{table}[htbp]
 \centering
 \caption{Targeted attacks at the reference threshold, $N=128$: median
@@ -2253,9 +2242,8 @@ Nullspace & 0.51 & 8.60 & $5.3\cdot10^{-8}$ & $1.1\cdot10^{-7}$ & 1.30 & 19.31 &
 \bottomrule
 \end{tabular}
 \end{table}
-Two properties are known in advance and serve as checks, and both hold. First, the
+Two properties are known in advance and serve as checks; both hold. First, the
 complement-restricted gain of the Nullspace Network is zero up to rounding, since its correction has no
-%TODO: Look at this in pdf
 component in $\mathcal{N}_\tau^\perp$. Second, by~\eqref{eq:split} its unrestricted gain can be neither
 smaller than the larger of its null-restricted gain $a$ and its cross gain $c$, the lower bound
 $\max(a,c)$, nor larger than the upper bound $\sqrt{a^2+c^2}$. The estimates respect the lower bound at all
@@ -2263,22 +2251,23 @@ $32$ points and the upper bound at $30$. At the other two the unrestricted estim
 $\sqrt{a^2+c^2}$ by at most $0.023$. This does not contradict~\eqref{eq:split}, which holds for the exact
 gains: the estimates of $a$ and $c$ are themselves lower bounds, and where their power iterations have not
 fully settled, the upper bound computed from them comes out slightly too small. In the median the cross
-gain alone accounts for $92\%$ of the unrestricted gain. All three maxima lie at the same point, and there
+gain alone accounts for $92\%$ of the unrestricted gain.
+%TODO: ALL three maxima of what?
+All three maxima lie at the same point, and there
 the unrestricted gain sits at the upper bound, $\sqrt{8.60^2+17.29^2}=19.31$, which by the remark
 after~\eqref{eq:split} points to a Jacobian close to rank one at the worst point. The correction of the Nullspace Network thus responds more than
 twice as strongly to input perturbations in $\mathcal{N}_\tau^\perp$ as to those in
 $\mathcal{N}_\tau$. The power iterations of the Nullspace Network had settled to a relative change below
-$10^{-3}$ in their last step at $27$ to $32$ of the $32$ points, depending on the gain, and below
-$1.3\cdot10^{-2}$ at all of them. Those of the residual network settle as well for the unrestricted, the
+$1.3\cdot10^{-2}$ at all of the $32$ points. Those of the residual network settle as well for the unrestricted, the
 cross and the attack gain, but more slowly for the null-restricted and the complement-restricted gain,
 at only $15$ and $17$ of the points, with a last change of up to $2.7\cdot10^{-2}$.\\
 In the median, the null-restricted gain of the Nullspace Network is less than two fifths of that of the
 residual network, and its maximum is a fifth lower. Its estimate lies below one at $26$ of the $32$
 points, which suggests that the correction of the Nullspace Network typically contracts null-space
-perturbations of its input; since the estimates are lower bounds, this is not certified. The residual
-network, whose lower bounds exceed one at every point, certainly amplifies them at every point. Taken on its own, this would suggest
-that the Nullspace Network is the more stable of the two in the null space, which the null-space attack
-of Section~\ref{sec:results-general} bears out only weakly. The reason is given in
+perturbations of its input. The residual
+network, whose lower bounds exceed one at every point, amplifies them at every point. Taken on its own, this would suggest
+that the Nullspace Network is the more stable of the two in the null space. The null-space attack
+of Section~\ref{sec:results-general} contradicts this. The reason is given in
 Section~\ref{sec:lipschitz}: no perturbation of the measurement changes the network input within
 $\mathcal{N}_\tau$, so the null-restricted gain describes no perturbation an attacker can make.\\
 The cross gain, the coupling the null-space attack exploits, is larger than the null-restricted gain for
