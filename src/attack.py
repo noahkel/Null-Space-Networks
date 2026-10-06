@@ -378,10 +378,12 @@ def max_quadratic_on_ball(b: np.ndarray, d: np.ndarray, r: float,
     A trust-region subproblem (Moré & Sorensen 1983). f is convex, so the
     maximum lies on the sphere, and c is a global maximiser exactly when
     (mu I - D) c = D b with mu >= max d and ||c|| = r. On (max d, inf) the norm
-    of c(mu) = D b / (mu - d) falls strictly from infinity to zero, so mu is
-    found by bisection on t = mu - max d. In the hard case, D b vanishing on the
-    directions of max d, the norm stays bounded as t -> 0 and the remaining
-    length is spent along such a direction. Returns (max f, c)."""
+    of c(mu) = D b / (mu - d) falls strictly from its value at mu = max d to
+    zero (D b != 0), so mu is found by bisection on t = mu - max d. When D b
+    vanishes on the directions of max d, c(t) stays bounded as t -> 0. If c(0)
+    is still longer than r, the regular case applies all the same, with the
+    bisection starting at t = 0; otherwise this is the hard case, and the
+    remaining length is spent along a direction of max d. Returns (max f, c)."""
     b = np.asarray(b, dtype=np.float64)
     d = np.asarray(d, dtype=np.float64)
     if r <= 0:
@@ -396,21 +398,23 @@ def max_quadratic_on_ball(b: np.ndarray, d: np.ndarray, r: float,
 
     hi = float(np.linalg.norm(db)) / r          # ||c(hi)|| <= ||D b|| / hi = r
     lo = float(np.linalg.norm(db[top])) / r     # ||c(lo)|| >= ||D b on top|| / lo = r
-    if lo > 0.0:
-        for _ in range(iters):
-            mid = math.sqrt(lo * hi)
-            if np.linalg.norm(c_of(mid)) > r:
-                lo = mid
-            else:
-                hi = mid
-        c = c_of(hi)
-    else:                                       # hard case
+    if lo == 0.0:                               # D b vanishes on the top directions
         c = np.zeros_like(b)
-        c[~top] = db[~top] / gap[~top]
+        c[~top] = db[~top] / gap[~top]          # c(0), finite there
         rest = r * r - float(c @ c)
-        if rest > 0:
-            j = int(np.flatnonzero(top)[0])
-            c[j] = math.sqrt(rest)
+        if rest >= 0:                           # hard case
+            if rest > 0:
+                j = int(np.flatnonzero(top)[0])
+                c[j] = math.sqrt(rest)
+            return float(np.sum(d * (b + c) ** 2)), c
+    for _ in range(iters):                      # ||c(lo)|| > r >= ||c(hi)||
+        # geometric bisection while lo > 0 resolves t over many decades
+        mid = math.sqrt(lo * hi) if lo > 0.0 else 0.5 * hi
+        if np.linalg.norm(c_of(mid)) > r:
+            lo = mid
+        else:
+            hi = mid
+    c = c_of(hi)
     return float(np.sum(d * (b + c) ** 2)), c
 
 

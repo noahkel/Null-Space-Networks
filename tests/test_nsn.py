@@ -3,7 +3,7 @@ test_nsn.py — the project's test suite, in one module.
 
 Covers, in order:
 
-   1. attack objectives      mse / shift / hybrid / null / range / targeted
+   1. attack objectives      mse / null / range / targeted
    2. attack primitives      norm projections, gradient normalisation, budgets
    3. the PGD attack         the one algorithm the suite runs
    4. metrics + aggregation  evaluate_batch, summarize_metrics, aggregate_*
@@ -12,12 +12,15 @@ Covers, in order:
    7. models                 RESNET / NSN forward semantics
    8. the UNet blocks        shape contracts and the odd-size skip padding
    9. pipeline setup         prepare_run, build_init_inputs, radon/model loading
-  10. radon operator         the MatrixRadonAdapter identities
-                             and the FBP filter construction
+  10. radon operator         the MatrixRadonAdapter identities, on a small
+                             geometry (16x16 image, 40 angles, [0°, 60°) window,
+                             float64), not on the cached 128x128 operator
   11. numeric helpers        the image-quality metrics in src/utils.py
   12. source hygiene         invariants the architecture depends on
   13. truncation study       src/truncation.py against the pipeline's projectors,
                              and the seeded phantom families
+  14. attack strength        the exact trust-region maximum and the residual on
+                             the discarded readings
 
 Every test is deterministic and needs no data directory, trained checkpoint or
 GPU. Gated with importorskip so it skips cleanly wherever torch / astra / scipy
@@ -2143,6 +2146,30 @@ def test_factor_check_rejects_U_and_V_from_different_decompositions(matrix_r):
         _with_factors(matrix_r, _U_k_la=U)._check_factors("test")
 
 
+def test_factor_check_rejects_factors_that_miss_only_the_left_identity(matrix_r):
+    """U_k^T A = S_k V_k^T, on which data consistency rests, is not implied by
+    the other three identities. Turning the first retained right singular
+    vector towards a discarded one and rebuilding U_k = A V_k S_k^{-1} keeps
+    both factors orthonormal and A V_k = U_k S_k exact; only the left residual
+    sees that V_k no longer spans singular directions."""
+    A = matrix_r._A_la.to_dense().to(torch.float64)
+    Vh = torch.linalg.svd(A, full_matrices=True).Vh
+    k = int(matrix_r._s_k_la.numel())
+    assert k < A.shape[1]                          # the fixture has a null space
+    V = matrix_r._Vt_k_la.t().clone()
+    a = 0.1
+    V[:, 0] = math.cos(a) * V[:, 0] + math.sin(a) * Vh[k]
+    AV = A @ V
+    s = torch.linalg.norm(AV, dim=0)
+    U = AV / s
+    eye = torch.eye(k, dtype=torch.float64)
+    assert torch.allclose(V.t() @ V, eye, atol=1e-10)
+    assert torch.allclose(U.t() @ U, eye, atol=1e-10)
+    with pytest.raises(RuntimeError, match="not a decomposition of A_la"):
+        _with_factors(matrix_r, _U_k_la=U, _s_k_la=s,
+                      _Vt_k_la=V.t().contiguous())._check_factors("test")
+
+
 def test_float32_adapter_decomposes_in_float64(monkeypatch):
     """The factors are stored in float32 but come from a float64 decomposition:
     a float32 one is what broke the projector."""
@@ -2545,6 +2572,21 @@ def test_max_quadratic_on_ball_hard_case():
     circle = r * np.stack([np.cos(phi), np.sin(phi)], axis=1)
     assert best == pytest.approx(float(np.max(((b + circle) ** 2 * d).sum(1))), rel=1e-8)
     assert np.linalg.norm(c) == pytest.approx(r)
+
+
+def test_max_quadratic_on_ball_vanishing_top_but_regular():
+    """b orthogonal to the direction of the largest weight, but so long that
+    c(0) already leaves the ball: not the hard case. The maximiser is the
+    regular solution (here c = (0, r)) and has to stay feasible."""
+    b = np.array([0.0, 10.0])
+    d = np.array([4.0, 1.0])
+    r = 1.0
+    best, c = attack.max_quadratic_on_ball(b, d, r)
+    phi = np.linspace(0, 2 * np.pi, 200001)
+    circle = r * np.stack([np.cos(phi), np.sin(phi)], axis=1)
+    assert np.linalg.norm(c) == pytest.approx(r, rel=1e-10)
+    assert best == pytest.approx(float(np.max(((b + circle) ** 2 * d).sum(1))), rel=1e-8)
+    assert best == pytest.approx(121.0, rel=1e-10)
 
 
 def _nsn_setup(r, seed=0, sigma=0.05, n=2):

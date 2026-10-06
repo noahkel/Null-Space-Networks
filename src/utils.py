@@ -20,10 +20,11 @@ def rel_l2_np(x: np.ndarray, y: np.ndarray) -> float:
     # (relative Euclidean error; the floor guards near-zero references).
     num = np.linalg.norm(x - y)
     den = np.linalg.norm(y)
-    # Clamp denominator to prevent blow-up on near-zero GT images.
-    # Sub-pixel ellipses from single_ellipse_generator produce all-zero discrete
-    # phantoms (ODL midpoint sampling); without this guard rel_l2 hits ~1e12.
-    # For 128×128: floor = 1e-3 * 128 ≈ 0.128, capping per-sample rel_l2 at ~30.
+    # Clamp denominator to prevent blow-up on near-zero references. The
+    # single-ellipse phantoms cannot be empty (single_ellipse_generator demands
+    # an area of at least 0.1 in [-1, 1]^2, about 410 pixels at 128x128), so
+    # the floor is only a guard against a near-empty reference.
+    # For 128×128: floor = 1e-3 * 128 ≈ 0.128.
     den = max(den, 1e-3 * float(np.sqrt(y.size)))
     return float(num / den)
 
@@ -123,10 +124,16 @@ def decompose_error(
     radon: "MatrixRadonAdapter",
 ) -> tuple:
     """
-    Orthogonal decomposition of image-space error e:
+    Orthogonal decomposition of image-space error e along the truncated SVD
+    A_la ≈ U_k Σ_k V_k^T:
 
-      e_ran = A_la^+ A_la e            — projection onto range(A_la^T) = row(A_la)
-      e_nul = (I - A_la^+ A_la) e = e - e_ran   — component in null(A_la)
+      e_ran = V_k V_k^T e = A_la^+ A_la e   — projection onto range(V_k), the
+                                             retained right singular directions
+      e_nul = (I - V_k V_k^T) e = e - e_ran — component in the numerical null
+                                             space N_tau = null(U_k Σ_k V_k^T)
+
+    A_la itself has full column rank; with the truncation, range(V_k) is a
+    proper subspace of range(A_la^T) = R^n.
     The two are orthogonal, so the energy splits exactly:
       ||e||_2^2 = ||e_ran||_2^2 + ||e_nul||_2^2.
 

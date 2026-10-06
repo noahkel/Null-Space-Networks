@@ -1,3 +1,15 @@
+"""Single-channel U-Net shared by both architectures.
+
+Taken from Simon Göppel's code, which adapts the U-Net of milesial/Pytorch-UNet
+(https://github.com/milesial/Pytorch-UNet, unet_parts.py and unet_model.py,
+licensed under the GNU General Public License v3.0). This is its bilinear
+variant with the BatchNorm layers removed (the convolutions keep bias=False,
+so the network is positively homogeneous up to the bias of OutConv) and with
+one input and one output channel.
+
+As a derivative of GPL-3.0 code, this file is distributed under the GNU General
+Public License v3.0, like the rest of this repository (see LICENSE).
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

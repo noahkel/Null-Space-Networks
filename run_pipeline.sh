@@ -92,6 +92,15 @@ setup_env() {
     echo "Commit:        $COMMIT"
     echo "Start time:    $(date)"
     python -c "import torch; print('PyTorch:', torch.__version__, '| CUDA:', torch.cuda.is_available(), '|', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+    # The packages that define the operator, the phantoms and the metrics: a
+    # change in ASTRA's strip kernel, for one, would change A.
+    python -c "
+import importlib
+for m in ('numpy', 'scipy', 'astra', 'odl', 'dival', 'skimage'):
+    try:
+        print(f'{m}:', getattr(importlib.import_module(m), '__version__', '?'))
+    except ImportError:
+        print(f'{m}: not installed')"
     echo "============================================"
 }
 

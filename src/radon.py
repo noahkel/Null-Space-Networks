@@ -70,17 +70,20 @@ class MatrixRadonAdapter:
       forward        y      = A x            (·dx)          -> forward()
       forward_la     y_la   = A_la x                        -> forward_la()
       A_la^+         = V_k Σ_k^{-1} U_k^T     (pseudoinverse) -> backward_la()
-      P_ran          = U_k U_k^T, projector onto range(A_la) -> proj_ran()
+      P_ran          = U_k U_k^T, projector onto range(U_k)  -> proj_ran()
       P_N            = I - A_la^+ A_la = I - V_k V_k^T       -> proj_null_image()
-                     image-domain projector onto null(A_la);  A_la P_N = 0
-      decompose      e_ran = A_la^+ A_la e,  e_nul = (I - A_la^+ A_la) e,
+                     image-domain projector onto the numerical null space
+                     N_tau = null(U_k Σ_k V_k^T);  P_ran A_la P_N = 0, while
+                     A_la P_N = sum_{i>k} s_i u_i v_i^T has norm s_{k+1} != 0
+      decompose      e_ran = V_k V_k^T e,  e_nul = (I - V_k V_k^T) e,
                      with ||e||^2 = ||e_ran||^2 + ||e_nul||^2  -> decompose_error()
-      ||A||_2        largest singular value of A (power iteration) -> norm_A / norm_A2
+      ||A||_2        largest singular value of the full-angle A (power
+                     iteration) -> norm_A / norm_A2
 
     Note that P_ran is *not* the 0/1 mask that keeps the measured rows: it is the
-    projector onto range(A_la), a subspace of the measured rows, because not
-    every sinogram supported on the measured angles is the measurement of some
-    image.
+    projector onto range(U_k), the k retained left singular directions, a
+    subspace of range(A_la) (which, A_la having full column rank, has dimension
+    n) and hence of the measured rows.
 
     Parameters
     ----------
@@ -110,10 +113,12 @@ class MatrixRadonAdapter:
         in. The decomposition itself always runs in float64 (see _truncated_svd).
     dense : bool
         Store A and A_la as dense tensors and apply them with cuBLAS matmuls
-        instead of sparse CSR kernels. Radon matrices are only ~1% sparse-
-        friendly on GPU, so dense float32 is typically much faster and avoids
-        the beta sparse-CSR autograd kernels. Costs O(m*n) memory per matrix
-        (~2 GB for 128x128 / 180 angles in float32).
+        instead of sparse CSR kernels. About 1.75% of the entries of the
+        strip-model matrix are nonzero at 128x128 (286 per row on average),
+        too dense for sparse kernels to pay off on the GPU, so dense float32 is
+        typically much faster and avoids the beta sparse-CSR autograd kernels.
+        Costs O(m*n) memory per matrix (~2 GB for 128x128 / 180 angles in
+        float32).
     cache_dir : str or Path or None
         Directory for caching matrices and SVD factors.
     """
@@ -331,22 +336,32 @@ class MatrixRadonAdapter:
     def _check_factors(self, source: str, hint: str = "") -> None:
         """Refuse factors that are not a truncated SVD of A_la.
 
-        The Nullspace Network's guarantees are these identities: only if V_k has
-        orthonormal rows is P_N = I - V_k^T V_k a projector, and only if also
-        A_la V_k^T = U_k S_k do P_ran A_la P_N = 0 (data consistency) and
-        V_k P_N = 0 (the range floor) hold. Factors that miss them by a percent
-        still reconstruct plausibly, so nothing downstream would notice.
+        The Nullspace Network's guarantees are these identities, written with
+        V_k for the n x k matrix whose transpose Vt_k is stored:
+          (A1) V_k^T V_k = I     P_N = I - V_k V_k^T is a projector, and with
+                                 (A3) data consistency P_ran A_la P_N = 0 and
+                                 the range floor A_la^+ A_la = V_k V_k^T hold;
+          (A2) U_k^T U_k = I     P_ran = U_k U_k^T is an orthogonal projector;
+          (A3) U_k^T A_la = S_k V_k^T;
+          (A4) A_la V_k = U_k S_k   with (A3), (I - P_ran) A_la = A_la P_N.
+        (A2) and (A4) together give U_k^T A_la V_k = S_k but say nothing about
+        U_k^T A_la (I - V_k V_k^T), so (A3) is checked on its own. Factors that
+        miss these by a percent still reconstruct plausibly, so nothing
+        downstream would notice.
 
-        Measures, with float64 accumulation, ||V_k V_k^T - I||_2 and
-        ||U_k^T U_k - I||_2 by power iteration and the backward residual
-        ||A_la V_k^T z - U_k S_k z|| / ||S_k z|| on random z; prints all three
-        and raises if any exceeds FACTOR_TOL.
+        Measures, with float64 accumulation, ||V_k^T V_k - I||_2 and
+        ||U_k^T U_k - I||_2 by power iteration, the right residual
+        ||A_la V_k z - U_k S_k z|| / ||S_k z|| on random z in R^k and the left
+        residual ||U_k^T A_la w - S_k V_k^T w|| / ||A_la w|| on random w in R^n;
+        prints all four and raises if any exceeds FACTOR_TOL.
         """
         U, Vt = self._U_k_la, self._Vt_k_la
         g = torch.Generator(device=self.device).manual_seed(0)
         z0 = torch.randn(int(self._s_k_la.numel()), 4, generator=g,
                          device=self.device, dtype=torch.float64)
         z0 = z0 / torch.linalg.norm(z0, dim=0)
+        w0 = torch.randn(int(Vt.shape[1]), 4, generator=g,
+                         device=self.device, dtype=torch.float64)
 
         def gram_defect(gram) -> float:
             # every iterate is a lower bound on the norm; keep the largest
@@ -362,10 +377,14 @@ class MatrixRadonAdapter:
         sz = self._s_k_la.to(torch.float64)[:, None] * z0
         res = self._mm64(self._A_la, self._mm64_t(Vt, z0)) - self._mm64(U, sz)
         f_def = float((torch.linalg.norm(res, dim=0) / torch.linalg.norm(sz, dim=0)).max())
+        aw = self._mm64(self._A_la, w0)
+        res = self._mm64_t(U, aw) - self._s_k_la.to(torch.float64)[:, None] * self._mm64(Vt, w0)
+        l_def = float((torch.linalg.norm(res, dim=0) / torch.linalg.norm(aw, dim=0)).max())
 
-        print(f"  factor check [{source}]: ||V V^T - I|| = {v_def:.1e}, "
-              f"||U^T U - I|| = {u_def:.1e}, ||A V^T z - U S z|| / ||S z|| = {f_def:.1e}")
-        worst = max(v_def, u_def, f_def)
+        print(f"  factor check [{source}]: ||V^T V - I|| = {v_def:.1e}, "
+              f"||U^T U - I|| = {u_def:.1e}, ||A V z - U S z|| / ||S z|| = {f_def:.1e}, "
+              f"||U^T A w - S V^T w|| / ||A w|| = {l_def:.1e}")
+        worst = max(v_def, u_def, f_def, l_def)
         if not worst <= self.FACTOR_TOL:          # written so that NaN fails too
             raise RuntimeError(
                 f"SVD factors from {source} are not a decomposition of A_la to "
@@ -543,13 +562,15 @@ class MatrixRadonAdapter:
 
     def proj_ran(self, y: torch.Tensor) -> torch.Tensor:
         """
-        Project sinogram onto range(A_la) using the SVD left-singular vectors:
+        Project sinogram onto range(U_k), the retained left singular directions
+        of A_la:
             y_r = U_kl (U_kl^T y_la)
         where y_la are the LA rows of y.  Result is full-shape with non-LA rows
         set to zero.
 
-        This is strictly smaller than "keep the measured rows": range(A_la) is a
-        k-dimensional subspace of the n_la*det_count measured coordinates.
+        This is strictly smaller than "keep the measured rows": range(U_k) is a
+        k-dimensional subspace of range(A_la), which has dimension n, which in
+        turn lies in the n_la*det_count measured coordinates.
         """
         self._require_svd("_U_k_la", "proj_ran")
         la_mask = self._la_mask()
@@ -626,7 +647,8 @@ class MatrixRadonAdapter:
 
     def proj_null_image(self, v: torch.Tensor) -> torch.Tensor:
         """
-        Project image v onto null(A_la): v_n = v - V_kl V_kl^T v.
+        Project image v onto the numerical null space N_tau of the truncated
+        operator: v_n = v - V_kl V_kl^T v. (A_la itself has full column rank.)
 
         Equivalently: v - Vt_kl.T @ (Vt_kl @ v_flat.T)
 
@@ -636,7 +658,7 @@ class MatrixRadonAdapter:
 
         Returns
         -------
-        v_n : (B, C, res, res)  — component of v in null(A_la)
+        v_n : (B, C, res, res)  — component of v in N_tau
         """
         self._require_svd("_Vt_k_la", "proj_null_image")
         orig_device, orig_dtype = v.device, v.dtype

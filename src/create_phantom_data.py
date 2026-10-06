@@ -30,7 +30,11 @@ from odl.phantom import ellipsoid_phantom
 
 
 def single_ellipse_generator(dataset, part='train'):
-    """Generator yielding images with exactly one random ellipse, centered and contained."""
+    """Generator yielding images with exactly one random ellipse, centered and contained.
+
+    Follows the structure of DIVAL's EllipsesDataset.generator (a RandomState
+    from the fixed seed, repeat(None, n), semi-axes 0.2 * exponential), reduced
+    to one ellipse per image."""
     seed = dataset.fixed_seeds.get(part)
     r = np.random.RandomState(seed)
     n = dataset.get_len(part=part)

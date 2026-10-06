@@ -96,6 +96,11 @@ def main(out_dir, data_dir, models, checkpoint_every=0, seed=0):
     # so two runs on the same data start from the same weights and see the same
     # batches. cuDNN convolution kernels are not bit-deterministic on the GPU,
     # so runs agree closely rather than exactly.
+    # The models are built one after the other from this one generator and then
+    # trained one after the other, so the RESNET and the NSN of a run start from
+    # different weights and see the batches in different orders. The draws
+    # depend on which models are trained: --models nsn alone gives the NSN a
+    # different initialisation than the default --models resnet,nsn.
     set_seed(seed)
 
     DATA_ROOT = data_dir
