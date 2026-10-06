@@ -37,7 +37,7 @@ sbatch slurm_ellipses.sh     # multi-ellipse phantoms at noise 0.01: 2 runs
 At every noise level `slurm_full_run.sh` runs the reference τ = 4·10⁻³, the τ at
 which the truncation study finds the pseudoinverse best (the job runs the study
 once before it builds the run matrix, and every run checks it again), and
-τ = 4.4·10⁻⁴ and 6.2·10⁻², which halve and double dim N(A). Each run goes
+τ = 4.4·10⁻⁴ and 6.2·10⁻², which halve and double dim N_τ. Each run goes
 through the tests' environment, the truncation study, data, training, the attack
 suite with the Lipschitz estimate, the budget sweep, the epoch study (total and
 null-space error) and the figures; a failing stage aborts the job. At the
@@ -133,8 +133,11 @@ the share of the exact worst case, seeds).
   restriction and every epoch-study snapshot reseeds from its own name
   (`stage_seed`), so a stage's numbers do not depend on which stages ran before
   it, both models start from the same random points, and along an epoch-study
-  curve only the weights change. Training is reproducible closely rather than
-  bit for bit, because cuDNN's convolution kernels are not deterministic.
+  curve only the weights change. Training and the attacks are reproducible
+  closely rather than bit for bit, because cuDNN's convolution kernels, which
+  the attacks backpropagate through as well, are not deterministic. `train.py`
+  builds and trains the two models one after the other from one seed, so they
+  start from different weights and see the batches in different orders.
 - **Attack budget** is κ‖P_k η_i‖ per sample, the noise the reconstruction
   receives, with κ = 1 by default (`--budget-factor`), for the attack suite and
   the epoch study alike; the step size is 2.5·ε_i/50. Every PGD iterate is
@@ -173,3 +176,9 @@ missing.
 
 `thesis.tex` builds with `pdflatex` + `biber`. It needs `references.bib` and
 `Parallel-beam-geometry.png`, which are not in the repository.
+
+## Credits
+
+This code builds on Simon Göppel's
+[data_proximal_networks](https://github.com/sgoep/data_proximal_networks), the
+starting point for the data generation, the U-Net and the Nullspace Network.
