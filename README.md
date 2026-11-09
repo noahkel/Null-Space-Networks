@@ -1,49 +1,122 @@
 # Null-Space-Networks
 
-Adversarial robustness of a residual UNet and a Nullspace Network for
-limited-angle CT (120° of a 180° parallel-beam scan, 128×128 images). Both
-networks correct the truncated pseudoinverse reconstruction; the Nullspace
-Network is constrained to correct only inside the null space of the forward
-operator. `thesis.tex` is the write-up; this file is how to run it.
+Code for the experiments on the adversarial robustness of a residual U-Net and a
+Nullspace Network in limited-angle CT: a 120° window of a 180° parallel-beam
+scan, 128×128 images. Both networks correct the truncated-SVD pseudoinverse
+reconstruction; the Nullspace Network may only add a correction that lies in the
+(numerical) null space of the forward operator. The repository trains both,
+attacks them with a PGD suite, estimates their local gains and renders every
+figure. The thesis itself lives in a separate repository.
 
-## Layout
+## Contents
+
+- [Quick start](#quick-start)
+- [Repository layout](#repository-layout)
+- [Reproducing the experiments](#reproducing-the-experiments)
+- [Outputs](#outputs)
+- [Conventions worth knowing](#conventions-worth-knowing)
+- [Tests](#tests)
+
+## Quick start
+
+Requirements: Linux, Python 3.11 (other recent versions likely work), a CUDA
+GPU for the full experiment. Everything runs from the repository root.
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt     # for a CUDA build of torch, install torch from pytorch.org first
+python -m pytest -q                 # ~1 min on a CPU, needs no data or GPU
+```
+
+To see the whole pipeline work end to end without a GPU, run it on a small
+geometry (32×32 images, 45 angles, two epochs) for one noise level. It runs the
+four truncations of that noise level one after another, about 25 minutes each
+on four CPU cores; the first finished run already has
+every stage's output (`attacks_n0.01_l2_smoke/`), so it can be stopped after
+that:
+
+```bash
+CONDA_ENV= RUN_TAG=_smoke WORK_DIR=/tmp/nsn_smoke RUN_TESTS=0 NOISES=0.01 EXTRA_SEEDS= \
+IMG_SIZE=32 NUM_THETAS=45 EPOCHS=2 CHECKPOINT_EVERY=1 \
+MAX_SAMPLES=8 SWEEP_MAX=4 EPOCH_STUDY_MAX=4 LIPSCHITZ_SAMPLES=4 TRUNC_SAMPLES=8 \
+bash slurm_full_run.sh
+```
+
+`CONDA_ENV=` (empty) tells the script to use the Python environment that is
+already active instead of loading the cluster's modules and conda environment.
+`RUN_TAG` and `WORK_DIR` keep the small data and models apart from those of the
+real experiment. Results and figures go to
+`attacks_*_smoke/` in the repository. The numbers of such a run mean nothing;
+it only checks that every stage runs.
+
+## Repository layout
 
 | path | what it does |
 | --- | --- |
-| `src/radon.py` | `MatrixRadonAdapter`: the system matrix (via ASTRA), its truncated SVD, the pseudoinverse and both projectors, with an on-disk cache |
+| `train.py` | trains both architectures on one data directory |
+| `attack.py` → `src/attack.py` | PGD attack suite, budget sweep, epoch study, metrics, Lipschitz estimate |
+| `visualise.py` → `src/visualisations.py` | every figure, rebuilt from the saved artifacts alone (no models or operator needed) |
+| `src/radon.py` | `MatrixRadonAdapter`: the system matrix (via ASTRA), its truncated SVD, the pseudoinverse and both projectors, with an on-disk cache in `radon_cache/` |
 | `src/create_phantom_data.py` | ellipse phantoms (one per image, or DIVAL's multi-ellipse ones), noisy sinograms, pseudoinverse initial reconstructions |
-| `src/unet.py`, `src/wrappers.py` | the UNet and the two wrappers (`RESNET`, `NSN`) |
-| `train.py` | trains both architectures on one noise level |
-| `src/attack.py` (entry: `attack.py`) | PGD attack suite, epoch study, metrics, Lipschitz estimate |
-| `src/visualisations.py` (entry: `visualise.py`) | every figure, rebuilt from saved artifacts only |
-| `slurm_full_run.sh` | the whole single-ellipse experiment as one Slurm job: every noise level at four truncations |
-| `slurm_ellipses.sh` | the multi-ellipse phantoms at one noise level, as a job of its own |
-| `run_pipeline.sh` | the stages of one run, shared by both jobs (sourced, not submitted) |
-| `src/truncation.py` | the truncation study of a run: the τ per noise level at which the pseudoinverse is best, how much the channel split depends on τ, candidates for a second truncation |
-| `make_tables.py` | the rows of every results table of the thesis and the numbers its prose cites, from the run directories alone |
+| `src/truncation.py` | the truncation study: the τ per noise level at which the pseudoinverse is best, how much the channel split depends on τ |
+| `src/unet.py`, `src/wrappers.py` | the U-Net and the two wrappers (`RESNET`, `NSN`) |
+| `src/ellipse_dataloader.py` | the dataset and the fixed train/val/test split |
+| `src/artifacts.py`, `src/utils.py` | on-disk result format; seeding, noise, metrics, model construction |
+| `run_pipeline.sh` | the stages of one run, shared by both jobs (sourced, not run on its own) |
+| `slurm_full_run.sh` | the whole single-ellipse experiment: every noise level at four truncations |
+| `slurm_ellipses.sh` | the multi-ellipse phantoms at one noise level |
+| `fetch_results.ps1` | (Windows, optional) copies the results of a cluster run to a local machine over ssh |
 | `tests/test_nsn.py` | the test suite |
 
-## Running
+## Reproducing the experiments
 
-Everything runs from the repository root, in the `data_prox2` environment.
+### The full experiment
 
-The whole experiment is two Slurm jobs, which can run at the same time:
+The experiment is two jobs, which can run at the same time. On a Slurm cluster:
 
 ```bash
-sbatch slurm_full_run.sh     # single ellipses: 4 noise levels x 4 truncations, 16 runs
-sbatch slurm_ellipses.sh     # multi-ellipse phantoms at noise 0.01: 2 runs
+sbatch slurm_full_run.sh     # single ellipses: 4 noise levels x 4 truncations, 16 runs (time limit 96 h)
+sbatch slurm_ellipses.sh     # multi-ellipse phantoms at noise 0.01: 2 runs (time limit 24 h)
 ```
+
+Without Slurm, run the same scripts with `bash` (the `#SBATCH` lines are then
+plain comments), e.g. `CONDA_ENV= bash slurm_full_run.sh` inside your own
+environment.
+
+Before submitting on another cluster, check these site-specific settings:
+
+| setting | where | default |
+| --- | --- | --- |
+| partition, time limit, mail | `#SBATCH` lines of both job scripts | `--partition=all`; mail to the submitting user |
+| environment modules | `MODULES` | `"anaconda/anaconda3 cuda/12.5"` (skipped where `module` does not exist) |
+| conda environment | `CONDA_ENV` | `data_prox2`; empty = use the active environment |
+| data / model location | `WORK_DIR`, or `DATA_BASE` and `MODEL_BASE` | the directory containing the repository |
+
+Every setting of `run_pipeline.sh` is an environment variable, so it can be
+changed without editing a file, e.g.
+
+```bash
+sbatch --export=ALL,NOISES=0.02 slurm_full_run.sh      # one noise level only
+sbatch --export=ALL,FORCE_RUN=1 slurm_full_run.sh      # redo finished runs
+sbatch --export=ALL,FORCE_TRAIN=1 slurm_full_run.sh    # retrain on the existing data
+sbatch --export=ALL,EXTRA_SEEDS= slurm_full_run.sh     # no extra seeds
+sbatch --export=ALL,CHECKPOINT_EVERY=1 slurm_full_run.sh  # epoch study at every epoch
+sbatch --export=ALL,RUN_TESTS=0 slurm_full_run.sh      # skip the test suite at the start
+```
+
+### What a job does
 
 At every noise level `slurm_full_run.sh` runs the reference τ = 4·10⁻³, the τ at
 which the truncation study finds the pseudoinverse best (the job runs the study
 once before it builds the run matrix, and every run checks it again), and
 τ = 4.4·10⁻⁴ and 6.2·10⁻², which halve and double dim N_τ. Each run goes
-through the tests' environment, the truncation study, data, training, the attack
-suite with the Lipschitz estimate, the budget sweep, the epoch study (total and
-null-space error) and the figures; a failing stage aborts the job. At the
-reference and the optimal τ both models are trained again with the seeds
-`EXTRA_SEEDS` (default `1 2`) and attacked by the suite, into `seed<s>/` of the
-run's model and output directories.
+through the truncation study, data, training, the attack suite with the
+Lipschitz estimate, the budget sweep, the epoch study (total and null-space
+error) and the figures; a failing stage aborts the job. At the reference and
+the optimal τ both models are trained again with the seeds `EXTRA_SEEDS`
+(default `1 2`) and attacked by the suite, into `seed<s>/` of the run's model
+and output directories.
 
 A run reuses the data when its `summary.json` exists and the models when every
 model has its `_history.json` (both are written last), after checking that the
@@ -53,14 +126,6 @@ of the code, and a finished run leaves `<run>/.complete` with the commit. A job
 that stopped is simply resubmitted: runs finished at the current commit are
 skipped. Runs whose models exist go first, so a problem in the later stages
 shows up before a day of training.
-
-```bash
-sbatch --export=ALL,NOISES=0.02 slurm_full_run.sh      # one noise level only
-sbatch --export=ALL,FORCE_RUN=1 slurm_full_run.sh      # redo finished runs
-sbatch --export=ALL,FORCE_TRAIN=1 slurm_full_run.sh    # retrain on the existing data
-sbatch --export=ALL,EXTRA_SEEDS= slurm_full_run.sh     # no extra seeds
-sbatch --export=ALL,CHECKPOINT_EVERY=1 slurm_full_run.sh  # epoch study at every epoch
-```
 
 All directories of these runs carry the tag `RUN_TAG` (default `_v2`): the data,
 models and results of the earlier runs, whose noise was confined to range(U_k),
@@ -72,7 +137,9 @@ overwrites another. The operator is decomposed once per geometry and τ and
 cached in `radon_cache/`; a job that needs an entry another job is still
 building waits for it.
 
-The stages by hand, for one noise level:
+### The stages by hand
+
+For one noise level at the reference τ (the paths are examples):
 
 ```bash
 python -m src.truncation --svd_thresh 4e-3 --run_noise 0.01 --out attacks_n0.01/truncation
@@ -85,18 +152,20 @@ python attack.py --data-root data/0.01 --model-dir models/0.01 --epoch-study --e
 python visualise.py attacks_n0.01
 ```
 
-`truncation` and `create_phantom_data` must be run with `-m`, since they import
-from `src`.
+`src.truncation` and `src.create_phantom_data` must be run with `-m`, since they
+import from `src`. Every script lists its options with `--help`. The data
+generation needs at least 5000 samples (`--n_samples`, the default), since the
+split below is by index.
 
-Once the runs are finished, the tables of the thesis come from
+## Outputs
 
-```bash
-python make_tables.py --runs 'attacks_*_v2' --out thesis_tables
-```
-
-which writes the LaTeX rows of every results table and `numbers.txt` with the
-values the text cites (medians, paired differences with bootstrap intervals,
-the share of the exact worst case, seeds).
+| location | contents |
+| --- | --- |
+| `<DATA_BASE>.../<noise>/` | `gt/`, `sino/`, `pinv/` (one `.npy` per sample), `y_diff_norms.npy` and `summary.json` with the geometry and noise statistics |
+| `<MODEL_BASE>.../<noise>/init_pinv/checkpoints/` | `{model}_best.pt` (lowest validation loss), `{model}_epochNNN.pt` snapshots, `{model}_history.json` loss curves |
+| `attacks_n<noise>[_tau<τ>][_ellipses]_l2_v2/` | one run's results: per-attack metrics (`.csv`/`.npz`/`.json`), `truncation/`, `epoch_study/`, `budget_sweep.csv`, `seed<s>/` and every figure |
+| `radon_cache/` | the decomposed operators, keyed on geometry, τ and dtype |
+| `logs/` | the Slurm logs; each starts with the commit and the versions of the numerical packages used |
 
 ## Conventions worth knowing
 
@@ -169,13 +238,10 @@ data or the models, so data generation and training have to be rerun.
 python -m pytest -q
 ```
 
-Tests that need the real operator are skipped where `astra` or `scipy` are
-missing.
-
-## Thesis
-
-`thesis.tex` builds with `pdflatex` + `biber`. It needs `references.bib` and
-`Parallel-beam-geometry.png`, which are not in the repository.
+Every test is deterministic and needs no data, checkpoint or GPU. Tests that
+need the real operator or the phantoms are skipped where `astra`, `scipy`,
+`odl` or `dival` are missing; `python -m pytest -rs` lists what was skipped.
+Use `python -m pytest`, not a bare `pytest`, which may belong to another Python.
 
 ## Credits
 

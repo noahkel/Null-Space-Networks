@@ -90,7 +90,7 @@ def eval_one_epoch(
 
     return running / max(n, 1)
 
-def main(out_dir, data_dir, models, checkpoint_every=0, seed=0):
+def main(out_dir, data_dir, models, checkpoint_every=0, seed=0, epochs=50):
 
     # Seeds weight initialisation and the shuffle order of the training loader,
     # so two runs on the same data start from the same weights and see the same
@@ -111,7 +111,7 @@ def main(out_dir, data_dir, models, checkpoint_every=0, seed=0):
 
     MODELS_TO_TRAIN = models
 
-    EPOCHS = 50
+    EPOCHS = epochs
     BATCH_SIZE = 32
     LR = 1e-4
     NUM_WORKERS = 2
@@ -245,14 +245,16 @@ def parse_list_arg(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 if __name__ == "__main__":
-    #Initialization of parameters
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Train the RESNET and/or NSN on one data directory.")
     parser.add_argument("--out_dir", type=str, default='./')
     parser.add_argument("--data_dir", type=str, default='./',
                         help="A single data directory produced by src/create_phantom_data.py "
                              "(e.g. ./data/0.01), containing summary.json and the "
                              "gt/sino/pinv folders.")
     parser.add_argument("--models", type=str, default="resnet,nsn")
+    parser.add_argument("--epochs", type=int, default=50,
+                        help="Training epochs per model (the thesis uses 50).")
     parser.add_argument("--seed", type=int, default=0,
                         help="Seed for weight initialisation and batch order.")
     parser.add_argument("--checkpoint-every", type=int, default=0, metavar="N",
@@ -264,5 +266,5 @@ if __name__ == "__main__":
     print("Successfully parsed args")
     main(out_dir=Path(args.out_dir), data_dir=Path(args.data_dir),
          models=parse_list_arg(args.models), checkpoint_every=args.checkpoint_every,
-         seed=args.seed)
+         seed=args.seed, epochs=args.epochs)
     print("Finished.")
