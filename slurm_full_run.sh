@@ -36,11 +36,14 @@
 #SBATCH --partition=all
 #SBATCH --time=96:00:00
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=c7021201@uibk.ac.at
+# Mail goes to the submitting user; for another address submit with
+#   sbatch --mail-user=you@example.org ...
 
 set -eo pipefail
 
-REPO_DIR=${REPO_DIR:-/scratch/noah/Null-Space-Networks}
+# The repository: where the job was submitted from (sbatch copies this script
+# elsewhere, so its own path does not tell), or where it lies when run with bash.
+REPO_DIR=${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}}
 cd "$REPO_DIR" || exit 1
 mkdir -p logs
 source "$REPO_DIR/run_pipeline.sh"

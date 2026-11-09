@@ -18,3 +18,10 @@ presentation_overview.py
 *.out
 *.xml
 *.toc
+
+# Local runs (see README: "The stages by hand")
+/data/
+/models/
+/truncation_*/
+/.venv/
+.pytest_cache/

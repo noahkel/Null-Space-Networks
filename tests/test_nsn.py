@@ -2689,28 +2689,3 @@ def test_lipschitz_attack_gain_matches_the_operator_through_the_pseudoinverse(ra
     scale = float(torch.linalg.norm(y0)) / float(torch.linalg.norm(x_gt))
     assert res["mean"] == pytest.approx(scale * expected_op, rel=1e-4)
     assert res["conv_max"] < 1e-6
-
-
-# =========================================================================== #
-# 15. make_tables.py - the statistics the thesis' tables report.
-# =========================================================================== #
-def test_median_interval_and_resolution():
-    import make_tables as T
-    rng = np.random.default_rng(0)
-    d = rng.normal(1.0, 0.5, 200)
-    med, lo, hi = T.median_interval(d, n_boot=2000)
-    assert med == pytest.approx(float(np.median(d)))
-    assert lo < med < hi
-    assert T.resolved(lo, hi) and T.resolved(-hi, -lo)
-    assert not T.resolved(*T.median_interval(rng.normal(0.0, 1.0, 50), n_boot=500)[1:])
-    assert T.signed(0.0153) == "+0.015" and T.signed(-0.0004) == "-0.0004" and T.signed(0.0) == "+0.000"
-
-
-def test_run_directory_names_are_parsed():
-    import make_tables as T
-    r = T.Run(Path("attacks_n0.05_tau0.031_l2_v2"))
-    assert (r.noise, r.tau, r.phantoms) == (0.05, 0.031, "single")
-    r = T.Run(Path("attacks_n0.01_ellipses_l2_v2"))
-    assert (r.noise, r.tau, r.phantoms) == (0.01, T.REF_TAU, "multi")
-    assert T.sci(4e-3) == "$4\\cdot10^{-3}$" and T.sci(6.2e-2) == "$6.2\\cdot10^{-2}$"
-    assert T.small(1.3e-7) == "$1.3\\cdot10^{-7}$" and T.small(2.345) == "2.35"

@@ -34,12 +34,16 @@ MAX_ANGLE=${MAX_ANGLE:-120}
 NUM_THETAS=${NUM_THETAS:-180}
 N_SAMPLES=${N_SAMPLES:-5000}
 MODELS=${MODELS:-resnet,nsn}
+EPOCHS=${EPOCHS:-50}
 
 # The reference truncation; runs at it keep the untagged paths.
 DEFAULT_SVD_THRESH=4e-3
 
-DATA_BASE=${DATA_BASE:-/scratch/noah/data_matrices}
-MODEL_BASE=${MODEL_BASE:-/scratch/noah/models_matrices}
+# Data and models live next to the repository (they are large: ~69 MB per
+# epoch snapshot), the attack results inside it (attacks_*/, git-ignored).
+WORK_DIR=${WORK_DIR:-$(dirname "$REPO_DIR")}
+DATA_BASE=${DATA_BASE:-$WORK_DIR/data_matrices}
+MODEL_BASE=${MODEL_BASE:-$WORK_DIR/models_matrices}
 RUN_TAG=${RUN_TAG-_v2}
 
 # The attack budget is the part of the noise the reconstruction receives,
@@ -72,13 +76,22 @@ FORCE_DATA=${FORCE_DATA:-0}
 FORCE_TRAIN=${FORCE_TRAIN:-0}
 FORCE_RUN=${FORCE_RUN:-0}
 
-# Modules, conda environment and the commit every stamp records.
+# Environment modules and conda, where the machine has them, and the commit
+# every stamp records. On a machine without `module` (a workstation), set
+# CONDA_ENV= (empty) and activate your own environment before starting.
+MODULES=${MODULES-"anaconda/anaconda3 cuda/12.5"}
+CONDA_ENV=${CONDA_ENV-data_prox2}
 setup_env() {
-    module purge
-    module load anaconda/anaconda3
-    module load cuda/12.5
-    source ~/.bashrc
-    conda activate data_prox2
+    if [ -n "$MODULES" ] && type module >/dev/null 2>&1; then
+        module purge
+        local m
+        for m in $MODULES; do module load "$m"; done
+    fi
+    if [ -n "$CONDA_ENV" ]; then
+        # conda's shell function comes from ~/.bashrc (or conda.sh)
+        type conda >/dev/null 2>&1 || source ~/.bashrc
+        conda activate "$CONDA_ENV"
+    fi
     export PYTHONPATH=$REPO_DIR:$PYTHONPATH
 
     COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -217,13 +230,16 @@ EOF
         echo "[reuse] data at $DATA_DIR"
     fi
     # The directory names stand for these parameters; make sure the data agree.
-    python - "$DATA_DIR/summary.json" "$NOISE" "$SVD_THRESH" "$PHANTOM" <<'EOF'
+    python - "$DATA_DIR/summary.json" "$NOISE" "$SVD_THRESH" "$PHANTOM" "$IMG_SIZE" <<'EOF'
 import json, math, sys
 path, noise, tau, phantom = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
+img_size = int(sys.argv[5])
 s = json.load(open(path))
 bad = [f"{k}={v!r}, expected {w!r}" for k, v, w in (
     ("noise_sigma_rel", float(s["noise_sigma_rel"]), noise),
     ("svd_threshold", float(s["svd_threshold"]), tau)) if not math.isclose(v, w, rel_tol=1e-9)]
+if int(s["img_size"]) != img_size:
+    bad.append(f"img_size={s['img_size']!r}, expected {img_size}")
 # data from before the multi-ellipse phantoms carry no "phantom" key
 if s.get("phantom", "single") != phantom:
     bad.append(f"phantom={s.get('phantom')!r}, expected {phantom!r}")
@@ -238,7 +254,7 @@ EOF
     if [ "$FORCE_TRAIN" = 1 ] || [ "$fresh_data" = 1 ] || ! has_models "$NOISE" "$SVD_THRESH" "$PHANTOM"; then
         banner training
         python -u train.py --data_dir "$DATA_DIR" --out_dir "$MODEL_DIR" \
-            --models "$MODELS" --checkpoint-every "$CHECKPOINT_EVERY"
+            --models "$MODELS" --epochs "$EPOCHS" --checkpoint-every "$CHECKPOINT_EVERY"
     else
         echo "[reuse] models at $MODEL_DIR"
     fi
@@ -278,7 +294,7 @@ EOF
         banner "seed $seed"
         if [ "$FORCE_TRAIN" = 1 ] || [ "$fresh_data" = 1 ] || ! models_in "$MODEL_DIR/seed$seed"; then
             python -u train.py --data_dir "$DATA_DIR" --out_dir "$MODEL_DIR/seed$seed" \
-                --models "$MODELS" --checkpoint-every 0 --seed "$seed"
+                --models "$MODELS" --epochs "$EPOCHS" --checkpoint-every 0 --seed "$seed"
         else
             echo "[reuse] models at $MODEL_DIR/seed$seed"
         fi
